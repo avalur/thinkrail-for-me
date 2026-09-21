@@ -2,6 +2,9 @@ import type {
 	AppConfig,
 	ExtUiRequest,
 	HostUpdateNotice,
+	HubAccountStatusChangedPayload,
+	HubMessage,
+	HubSyncStatusPayload,
 	LoginPush,
 	Project,
 	ReviewChangedPayload,
@@ -70,6 +73,27 @@ function refreshLoadedWorkspaceLists(connectionGeneration: number): void {
 	}
 }
 
+function refreshHubData(connectionGeneration: number): void {
+	const current = (): boolean =>
+		isConnectedGeneration(useAppStore.getState(), connectionGeneration);
+	void getTransport()
+		.request("hub.getAccounts", {})
+		.then((res) => {
+			if (current() && res?.accounts) {
+				useAppStore.getState().setHubAccounts(res.accounts);
+			}
+		})
+		.catch(() => {});
+	void getTransport()
+		.request("hub.getDashboardSummary", {})
+		.then((summary) => {
+			if (current() && summary) {
+				useAppStore.getState().setHubDashboard(summary);
+			}
+		})
+		.catch(() => {});
+}
+
 export function initTransport(): WsTransport {
 	if (transport) return transport;
 	const piEvents = createPiEventBatcher((payloads) =>
@@ -110,6 +134,7 @@ export function initTransport(): WsTransport {
 			);
 		refreshLoadedWorkspaceLists(useAppStore.getState().connectionGeneration);
 		refreshSessionActivity(useAppStore.getState().connectionGeneration);
+		refreshHubData(useAppStore.getState().connectionGeneration);
 	});
 
 	transport.subscribe(WS_CHANNELS.hostUpdateAvailable, (data) => {
@@ -187,6 +212,18 @@ export function initTransport(): WsTransport {
 
 	transport.subscribe(WS_CHANNELS.settingsChanged, (data) => {
 		useAppStore.getState().applyConfig(data as AppConfig);
+	});
+
+	transport.subscribe(WS_CHANNELS.hubMessageReceived, (data) => {
+		useAppStore.getState().applyHubMessageReceived(data as HubMessage);
+	});
+
+	transport.subscribe(WS_CHANNELS.hubAccountStatusChanged, (data) => {
+		useAppStore.getState().applyHubAccountStatusChanged(data as HubAccountStatusChangedPayload);
+	});
+
+	transport.subscribe(WS_CHANNELS.hubSyncStatus, (data) => {
+		useAppStore.getState().applyHubSyncStatus(data as HubSyncStatusPayload);
 	});
 
 	transport.connect();

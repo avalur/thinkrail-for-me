@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
 	ACTIVITY_PROTOCOL_VERSION,
 	ANALYTICS_CONSENT_PROTOCOL_VERSION,
+	HUB_PROTOCOL_VERSION,
 	JBCENTRAL_QUOTA_PROTOCOL_VERSION,
 	normalizeSessionTitle,
 	PROJECT_TEMPLATE_PREVIEW_PROTOCOL_VERSION,
@@ -73,4 +74,18 @@ test("session titles normalize to one bounded non-blank line", () => {
 	expect(normalizeSessionTitle(42)).toBeNull();
 	expect(normalizeSessionTitle("x".repeat(80))).toBe("x".repeat(80));
 	expect(normalizeSessionTitle("x".repeat(81))).toBeNull();
+});
+
+test("hub features advance the protocol and name channels and methods", () => {
+	expect(HUB_PROTOCOL_VERSION).toBe(67);
+	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(HUB_PROTOCOL_VERSION);
+	expect(WS_METHODS.hubGetAccounts).toBe("hub.getAccounts");
+	expect(WS_METHODS.hubGetMessages).toBe("hub.getMessages");
+	expect(WS_METHODS.hubGetDashboardSummary).toBe("hub.getDashboardSummary");
+	expect(WS_METHODS.hubMarkRead).toBe("hub.markRead");
+	expect(WS_METHODS.hubSendMessage).toBe("hub.sendMessage");
+	expect(WS_METHODS.hubSyncNow).toBe("hub.syncNow");
+	expect(WS_CHANNELS.hubMessageReceived).toBe("hub.messageReceived");
+	expect(WS_CHANNELS.hubAccountStatusChanged).toBe("hub.accountStatusChanged");
+	expect(WS_CHANNELS.hubSyncStatus).toBe("hub.syncStatus");
 });

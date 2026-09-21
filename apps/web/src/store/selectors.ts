@@ -2,6 +2,8 @@ import {
 	type ActivityStatus,
 	ANALYTICS_CONSENT_PROTOCOL_VERSION,
 	type GitDiffScope,
+	type HubAccount,
+	type HubDashboardSummary,
 	type Project,
 	SESSION_RENAME_PROTOCOL_VERSION,
 	type SpecGraphNode,
@@ -535,4 +537,50 @@ export function projectActivityRollup(
 		if (entry.projectId === projectId) records.push(entry.sessions);
 	}
 	return rollUp(records);
+}
+
+export function selectViewMode(state: { viewMode: "ide" | "hub" }): "ide" | "hub" {
+	return state.viewMode;
+}
+
+export function selectHubActiveTab(state: { hubActiveTab: string }): string {
+	return state.hubActiveTab;
+}
+
+export function selectHubAccounts(state: { hubAccounts: HubAccount[] }): HubAccount[] {
+	return state.hubAccounts;
+}
+
+export function selectHubDashboard(state: {
+	hubDashboard: HubDashboardSummary | null;
+}): HubDashboardSummary | null {
+	return state.hubDashboard;
+}
+
+export function selectHubTotalUnread(state: {
+	hubAccounts: HubAccount[];
+	hubDashboard: HubDashboardSummary | null;
+}): number {
+	if (state.hubDashboard && typeof state.hubDashboard.totalUnread === "number") {
+		return state.hubDashboard.totalUnread;
+	}
+	return state.hubAccounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
+}
+
+export function selectHubAssistantSidebarOpen(state: {
+	hubAssistantSidebarOpen: boolean;
+}): boolean {
+	return state.hubAssistantSidebarOpen;
+}
+
+export function selectHubLoading(state: { hubLoading: boolean }): boolean {
+	return state.hubLoading;
+}
+
+export function selectHubSyncing(state: { hubSyncing: boolean }): boolean {
+	return state.hubSyncing;
+}
+
+export function selectHubError(state: { hubError: string | null }): string | null {
+	return state.hubError;
 }

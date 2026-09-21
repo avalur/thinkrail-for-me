@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { SkillCatalogEntry, SlashCommandInfo } from "@thinkrail/contracts";
 import specGraphExtension from "pi-spec-graph";
+import { hubToolsExtension } from "../hub/tools";
 import {
 	type AskUserQuestionWaiters,
 	askUserQuestionExtension,
@@ -69,9 +70,19 @@ function resolveDevPaths(): { extensionPaths: string[]; skillPaths: string[] } {
 			join(dirname(specGraphPath), "skills"),
 			join(dirname(workflowPath), "skills"),
 			join(dirname(todosPath), "skills"),
+			resolve(join(import.meta.dir, "../hub/skill")),
 		],
 	};
 	return devPaths;
+}
+
+function getBuiltinSkillPaths(): string[] {
+	const hubSkillPath = resolve(join(import.meta.dir, "../hub/skill"));
+	const bundledSkillPaths = bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
+	if (bundledSkillPaths.some((p) => isUnderPath(hubSkillPath, p))) {
+		return bundledSkillPaths;
+	}
+	return [...bundledSkillPaths, hubSkillPath];
 }
 
 const headlessSearchPolicy: ExtensionFactory = (pi: ExtensionAPI) => {
@@ -152,7 +163,7 @@ function resolveSkillInputs(
 	const candidates = candidateCompatibilitySkillRoots(cwd);
 	const personal = candidates.filter((source) => source.scope === "user");
 	const project = candidates.filter((source) => source.scope === "project");
-	const bundledSkillPaths = bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
+	const bundledSkillPaths = getBuiltinSkillPaths();
 	return {
 		additionalSkillPaths: [
 			...bundledSkillPaths,
@@ -184,7 +195,7 @@ function webAccessFactory(): BundledExtensionFactory {
 }
 
 export function childExtensionFactories(): ExtensionFactory[] {
-	return [headlessSearchPolicy, webAccessFactory(), specGraphExtension];
+	return [headlessSearchPolicy, webAccessFactory(), specGraphExtension, hubToolsExtension];
 }
 
 export async function buildResourceLoader(
@@ -200,6 +211,7 @@ export async function buildResourceLoader(
 		askUserQuestionExtension(askUserQuestionWaiters),
 		reviewToolExtension,
 		oversizedImageGuard,
+		hubToolsExtension,
 		...extraFactories,
 	];
 	const skillInputs = resolveSkillInputs(cwd, getAdmission);
@@ -326,7 +338,7 @@ export async function listSkillCatalog(
 	const discovered = discoverCompatibilitySkillSources(cwd);
 	const personal = discovered.filter((s) => s.scope === "user");
 	const project = discovered.filter((s) => s.scope === "project");
-	const bundledSkillPaths = bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
+	const bundledSkillPaths = getBuiltinSkillPaths();
 	const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: true });
 	const loader = new DefaultResourceLoader({
 		cwd,

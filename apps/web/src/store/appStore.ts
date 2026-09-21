@@ -7,6 +7,11 @@ import type {
 	GitDiffScope,
 	HostPlatform,
 	HostUpdateNotice,
+	HubAccount,
+	HubAccountStatusChangedPayload,
+	HubDashboardSummary,
+	HubMessage,
+	HubSyncStatusPayload,
 	LayoutPreset,
 	LoginFrame,
 	LoginPush,
@@ -824,6 +829,36 @@ interface AppState {
 	reviewAutoFix: boolean;
 	customLayoutPresets: LayoutPreset[];
 	toasts: Toast[];
+
+	// Hub state
+	viewMode: "ide" | "hub";
+	hubActiveTab: string;
+	hubAccounts: HubAccount[];
+	hubDashboard: HubDashboardSummary | null;
+	hubMessages: HubMessage[];
+	hubLoading: boolean;
+	hubSyncing: boolean;
+	hubError: string | null;
+	hubAssistantSidebarOpen: boolean;
+	hubAssistantSessionId: string | null;
+	hubAssistantWorkspaceId: string | null;
+
+	// Hub actions
+	setViewMode: (mode: "ide" | "hub") => void;
+	setHubActiveTab: (tab: string) => void;
+	setHubAccounts: (accounts: HubAccount[]) => void;
+	setHubDashboard: (dashboard: HubDashboardSummary | null) => void;
+	setHubMessages: (messages: HubMessage[]) => void;
+	setHubLoading: (loading: boolean) => void;
+	setHubSyncing: (syncing: boolean) => void;
+	setHubError: (error: string | null) => void;
+	setHubAssistantSidebarOpen: (open: boolean) => void;
+	toggleHubAssistantSidebar: () => void;
+	setHubAssistantSession: (workspaceId: string | null, sessionId: string | null) => void;
+	applyHubMessageReceived: (message: HubMessage) => void;
+	applyHubAccountStatusChanged: (payload: HubAccountStatusChangedPayload) => void;
+	applyHubSyncStatus: (payload: HubSyncStatusPayload) => void;
+
 	setStatus: (status: ConnectionStatus) => void;
 	installWelcomeSnapshot: (
 		protocolVersion: number,
@@ -1632,1637 +1667,1766 @@ function nextTerminalTitle(list: TerminalTab[]): string {
 	return `Terminal ${Math.max(0, ...used) + 1}`;
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
-	status: "connecting",
-	connectionGeneration: 0,
-	welcomeGeneration: 0,
-	protocolVersion: null,
-	hostPlatform: null,
-	hostUpdate: null,
-	projects: [],
-	recentProjects: [],
-	workspaces: {},
-	removedWorkspaceIds: Object.create(null) as Record<string, true>,
-	activityByWorkspace: Object.create(null) as Record<string, WorkspaceActivity>,
-	expandedProjectIds: Object.create(null) as Record<string, true>,
-	selectedProjectId: null,
-	activeWorkspaceId: null,
-	workspaceSelectionHistory: [],
-	routeChatTarget: null,
-	routeChatTargetGeneration: 0,
-	workbenchFrame: null,
-	workspaceViewsByWorkspace: {},
-	layoutStateReady: false,
-	localLayoutPreferences: { ...DEFAULT_LOCAL_LAYOUT_PREFERENCES },
-	layoutDocumentsByWorkspace: {},
-	layoutAttentionByWorkspace: {},
-	layoutProjectionEpochByWorkspace: {},
-	layoutIntents: [],
-	tabsByWorkspace: {},
-	activeTabByWorkspace: {},
-	previewTabByWorkspace: {},
-	navTickByWorkspace: {},
-	closedChatsByWorkspace: {},
-	chatStartsByWorkspace: {},
-	worktreeCreationsByProject: {},
-	deletedSessionsByWorkspace: Object.create(null) as Record<string, Record<string, true>>,
-	terminalsByWorkspace: {},
-	activeTerminalByWorkspace: {},
-	sessions: {},
-	extUiOrphans: [],
-	models: [],
-	providerVersion: 0,
-	templatesVersion: 0,
-	modelsRefreshing: false,
-	modelsFresh: false,
-	changesRequest: null,
-	specRequest: null,
-	specsByWorkspace: {},
-	reviewsByWorkspace: {},
-	reviewFocusRequest: null,
-	changesView: "list",
-	diffScopeByWorkspace: {},
-	chatLocationRequest: null,
-	historyOpenRequest: null,
-	fsChangesByWorkspace: {},
-	skillChangeTickByWorkspace: {},
-	skillsSyncedTickBySession: {},
-	activeLogin: null,
-	settingsOpen: false,
-	settingsSection: SettingsSection.Providers,
-	interviewPromptOpen: false,
-	theme: DEFAULT_CONFIG.theme,
-	themeMode: DEFAULT_CONFIG.themeMode,
-	systemThemePair: DEFAULT_CONFIG.systemThemePair,
-	analyticsEnabled: DEFAULT_CONFIG.analyticsEnabled,
-	analyticsConsentConfirmed: DEFAULT_CONFIG.analyticsConsentConfirmed,
-	subagentsEnabled: DEFAULT_CONFIG.subagentsEnabled,
-	jbcentralQuotaEnabled: DEFAULT_CONFIG.jbcentralQuotaEnabled,
-	jbcentralQuotaRefreshSeconds: DEFAULT_CONFIG.jbcentralQuotaRefreshSeconds,
-	terminalReplayKb: DEFAULT_CONFIG.terminalReplayKb,
-	terminalWindowsShell: DEFAULT_CONFIG.terminalWindowsShell,
-	composerGrowthLimit: DEFAULT_CONFIG.composerGrowthLimit,
-	chatLineWidth: DEFAULT_CONFIG.chatLineWidth,
-	fileLineWidth: DEFAULT_CONFIG.fileLineWidth,
-	chatLineWidthBounded: DEFAULT_CONFIG.chatLineWidthBounded,
-	fileLineWidthBounded: DEFAULT_CONFIG.fileLineWidthBounded,
-	chatMessageOrder: "oldest-first",
-	streamingResponseMovement: { ...DEFAULT_STREAMING_RESPONSE_MOVEMENT },
-	customLayoutPresets: DEFAULT_CONFIG.customLayoutPresets,
-	reviewModel: DEFAULT_CONFIG.reviewModel,
-	reviewEffort: DEFAULT_CONFIG.reviewEffort,
-	reviewAutoFix: DEFAULT_CONFIG.reviewAutoFix,
-	toasts: [],
-	setStatus: (status) =>
-		set((state) => ({
-			status,
-			protocolVersion: null,
-			connectionGeneration:
-				status === "connected" ? state.connectionGeneration + 1 : state.connectionGeneration,
-		})),
-	installWelcomeSnapshot: (
-		protocolVersion,
-		projects,
-		recentProjects,
-		config,
-		hostPlatform,
-		hostUpdate,
-	) =>
-		set((state) => {
-			const openProjects = sortProjects(projects.filter((project) => project.closed !== true));
-			return {
-				protocolVersion,
-				projects: openProjects,
-				recentProjects: sortProjects(recentProjects),
-				hostPlatform: hostPlatform ?? null,
-				hostUpdate: hostUpdate ?? null,
-				...(config ? configPatch(config) : {}),
-				...reconcileProjectNavigation(state, openProjects),
-				...pruneExpandedProjects(state, openProjects),
-				welcomeGeneration: state.welcomeGeneration + 1,
-			};
-		}),
-	applyHostUpdate: (hostUpdate) => set({ hostUpdate }),
-	installProjectSnapshot: (projects, recentProjects) =>
-		set((state) => {
-			const openProjects = sortProjects(projects.filter((project) => project.closed !== true));
-			return {
-				projects: openProjects,
-				recentProjects: sortProjects(recentProjects),
-				...reconcileProjectNavigation(state, openProjects),
-				...pruneExpandedProjects(state, openProjects),
-			};
-		}),
-	applyProjectUpdated: (project) =>
-		set((state) => {
-			const projects =
-				project.closed === true
-					? state.projects.filter((candidate) => candidate.id !== project.id)
-					: sortProjects(upsertProject(state.projects, project));
-			return {
-				projects,
-				recentProjects: sortProjects(upsertProject(state.recentProjects, project)),
-				...reconcileProjectNavigation(state, projects),
-				...pruneExpandedProjects(state, projects),
-			};
-		}),
-	setWorkspaces: (projectId, workspaces) =>
-		set((s) => ({
-			workspaces: {
-				...s.workspaces,
-				[projectId]: workspaces.filter((workspace) => !s.removedWorkspaceIds[workspace.id]),
-			},
-		})),
-	addWorkspace: (workspace) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspace.id]) return {};
-			const list = s.workspaces[workspace.projectId];
-			if (!list) return {};
-			return {
+export const useAppStore = create<AppState>((set, get, storeApi) => {
+	storeApi.getInitialState = storeApi.getState;
+	return {
+		status: "connecting",
+		connectionGeneration: 0,
+		welcomeGeneration: 0,
+		protocolVersion: null,
+		hostPlatform: null,
+		hostUpdate: null,
+		projects: [],
+		recentProjects: [],
+		workspaces: {},
+		removedWorkspaceIds: Object.create(null) as Record<string, true>,
+		activityByWorkspace: Object.create(null) as Record<string, WorkspaceActivity>,
+		expandedProjectIds: Object.create(null) as Record<string, true>,
+		selectedProjectId: null,
+		activeWorkspaceId: null,
+		workspaceSelectionHistory: [],
+		routeChatTarget: null,
+		routeChatTargetGeneration: 0,
+		workbenchFrame: null,
+		workspaceViewsByWorkspace: {},
+		layoutStateReady: false,
+		localLayoutPreferences: { ...DEFAULT_LOCAL_LAYOUT_PREFERENCES },
+		layoutDocumentsByWorkspace: {},
+		layoutAttentionByWorkspace: {},
+		layoutProjectionEpochByWorkspace: {},
+		layoutIntents: [],
+		tabsByWorkspace: {},
+		activeTabByWorkspace: {},
+		previewTabByWorkspace: {},
+		navTickByWorkspace: {},
+		closedChatsByWorkspace: {},
+		chatStartsByWorkspace: {},
+		worktreeCreationsByProject: {},
+		deletedSessionsByWorkspace: Object.create(null) as Record<string, Record<string, true>>,
+		terminalsByWorkspace: {},
+		activeTerminalByWorkspace: {},
+		sessions: {},
+		extUiOrphans: [],
+		models: [],
+		providerVersion: 0,
+		templatesVersion: 0,
+		modelsRefreshing: false,
+		modelsFresh: false,
+		changesRequest: null,
+		specRequest: null,
+		specsByWorkspace: {},
+		reviewsByWorkspace: {},
+		reviewFocusRequest: null,
+		changesView: "list",
+		diffScopeByWorkspace: {},
+		chatLocationRequest: null,
+		historyOpenRequest: null,
+		fsChangesByWorkspace: {},
+		skillChangeTickByWorkspace: {},
+		skillsSyncedTickBySession: {},
+		activeLogin: null,
+		settingsOpen: false,
+		settingsSection: SettingsSection.Providers,
+		interviewPromptOpen: false,
+		theme: DEFAULT_CONFIG.theme,
+		themeMode: DEFAULT_CONFIG.themeMode,
+		systemThemePair: DEFAULT_CONFIG.systemThemePair,
+		analyticsEnabled: DEFAULT_CONFIG.analyticsEnabled,
+		analyticsConsentConfirmed: DEFAULT_CONFIG.analyticsConsentConfirmed,
+		subagentsEnabled: DEFAULT_CONFIG.subagentsEnabled,
+		jbcentralQuotaEnabled: DEFAULT_CONFIG.jbcentralQuotaEnabled,
+		jbcentralQuotaRefreshSeconds: DEFAULT_CONFIG.jbcentralQuotaRefreshSeconds,
+		terminalReplayKb: DEFAULT_CONFIG.terminalReplayKb,
+		terminalWindowsShell: DEFAULT_CONFIG.terminalWindowsShell,
+		composerGrowthLimit: DEFAULT_CONFIG.composerGrowthLimit,
+		chatLineWidth: DEFAULT_CONFIG.chatLineWidth,
+		fileLineWidth: DEFAULT_CONFIG.fileLineWidth,
+		chatLineWidthBounded: DEFAULT_CONFIG.chatLineWidthBounded,
+		fileLineWidthBounded: DEFAULT_CONFIG.fileLineWidthBounded,
+		chatMessageOrder: "oldest-first",
+		streamingResponseMovement: { ...DEFAULT_STREAMING_RESPONSE_MOVEMENT },
+		customLayoutPresets: DEFAULT_CONFIG.customLayoutPresets,
+		reviewModel: DEFAULT_CONFIG.reviewModel,
+		reviewEffort: DEFAULT_CONFIG.reviewEffort,
+		reviewAutoFix: DEFAULT_CONFIG.reviewAutoFix,
+		toasts: [],
+
+		// Hub initial state
+		viewMode: "ide",
+		hubActiveTab: "dashboard",
+		hubAccounts: [],
+		hubDashboard: null,
+		hubMessages: [],
+		hubLoading: false,
+		hubSyncing: false,
+		hubError: null,
+		hubAssistantSidebarOpen: true,
+		hubAssistantSessionId: null,
+		hubAssistantWorkspaceId: null,
+
+		// Hub actions
+		setViewMode: (viewMode) => set({ viewMode }),
+		setHubActiveTab: (hubActiveTab) => set({ hubActiveTab }),
+		setHubAccounts: (hubAccounts) => set({ hubAccounts }),
+		setHubDashboard: (hubDashboard) => set({ hubDashboard }),
+		setHubMessages: (hubMessages) => set({ hubMessages }),
+		setHubLoading: (hubLoading) => set({ hubLoading }),
+		setHubSyncing: (hubSyncing) => set({ hubSyncing }),
+		setHubError: (hubError) => set({ hubError }),
+		setHubAssistantSidebarOpen: (hubAssistantSidebarOpen) => set({ hubAssistantSidebarOpen }),
+		toggleHubAssistantSidebar: () =>
+			set((state) => ({ hubAssistantSidebarOpen: !state.hubAssistantSidebarOpen })),
+		setHubAssistantSession: (workspaceId, sessionId) =>
+			set({ hubAssistantWorkspaceId: workspaceId, hubAssistantSessionId: sessionId }),
+		applyHubMessageReceived: (message) =>
+			set((state) => {
+				const existingIndex = state.hubMessages.findIndex((m) => m.id === message.id);
+				const hubMessages =
+					existingIndex >= 0
+						? state.hubMessages.map((m, idx) => (idx === existingIndex ? message : m))
+						: [message, ...state.hubMessages];
+
+				const isNewUnread = existingIndex < 0 && !message.isRead;
+				const hubAccounts = state.hubAccounts.map((acc) => {
+					if (acc.id === message.accountId && isNewUnread) {
+						return { ...acc, unreadCount: acc.unreadCount + 1 };
+					}
+					return acc;
+				});
+
+				let hubDashboard = state.hubDashboard;
+				if (hubDashboard) {
+					const accounts = hubDashboard.accounts.map((acc) => {
+						if (acc.id === message.accountId && isNewUnread) {
+							return { ...acc, unreadCount: acc.unreadCount + 1 };
+						}
+						return acc;
+					});
+					const recentActivity = [
+						message,
+						...hubDashboard.recentActivity.filter((m) => m.id !== message.id),
+					].slice(0, 50);
+					const urgentMessages = message.isUrgent
+						? [message, ...hubDashboard.urgentMessages.filter((m) => m.id !== message.id)].slice(
+								0,
+								50,
+							)
+						: hubDashboard.urgentMessages;
+					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
+					hubDashboard = {
+						...hubDashboard,
+						totalUnread,
+						accounts,
+						recentActivity,
+						urgentMessages,
+					};
+				}
+
+				return { hubMessages, hubAccounts, hubDashboard };
+			}),
+		applyHubAccountStatusChanged: (payload) =>
+			set((state) => {
+				const hubAccounts = state.hubAccounts.map((acc) => {
+					if (acc.id === payload.accountId) {
+						const updated: HubAccount = {
+							...acc,
+							status: payload.status,
+							unreadCount: payload.unreadCount,
+						};
+						if (payload.error !== undefined) {
+							updated.error = payload.error;
+						} else {
+							delete updated.error;
+						}
+						return updated;
+					}
+					return acc;
+				});
+				let hubDashboard = state.hubDashboard;
+				if (hubDashboard) {
+					const accounts = hubDashboard.accounts.map((acc) => {
+						if (acc.id === payload.accountId) {
+							return {
+								...acc,
+								status: payload.status,
+								unreadCount: payload.unreadCount,
+							};
+						}
+						return acc;
+					});
+					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
+					hubDashboard = { ...hubDashboard, accounts, totalUnread };
+				}
+				return { hubAccounts, hubDashboard };
+			}),
+		applyHubSyncStatus: (payload) =>
+			set((state) => ({
+				hubSyncing: payload.isSyncing,
+				hubError: payload.error ?? (payload.isSyncing ? state.hubError : null),
+			})),
+
+		setStatus: (status) =>
+			set((state) => ({
+				status,
+				protocolVersion: null,
+				connectionGeneration:
+					status === "connected" ? state.connectionGeneration + 1 : state.connectionGeneration,
+			})),
+		installWelcomeSnapshot: (
+			protocolVersion,
+			projects,
+			recentProjects,
+			config,
+			hostPlatform,
+			hostUpdate,
+		) =>
+			set((state) => {
+				const openProjects = sortProjects(projects.filter((project) => project.closed !== true));
+				return {
+					protocolVersion,
+					projects: openProjects,
+					recentProjects: sortProjects(recentProjects),
+					hostPlatform: hostPlatform ?? null,
+					hostUpdate: hostUpdate ?? null,
+					...(config ? configPatch(config) : {}),
+					...reconcileProjectNavigation(state, openProjects),
+					...pruneExpandedProjects(state, openProjects),
+					welcomeGeneration: state.welcomeGeneration + 1,
+				};
+			}),
+		applyHostUpdate: (hostUpdate) => set({ hostUpdate }),
+		installProjectSnapshot: (projects, recentProjects) =>
+			set((state) => {
+				const openProjects = sortProjects(projects.filter((project) => project.closed !== true));
+				return {
+					projects: openProjects,
+					recentProjects: sortProjects(recentProjects),
+					...reconcileProjectNavigation(state, openProjects),
+					...pruneExpandedProjects(state, openProjects),
+				};
+			}),
+		applyProjectUpdated: (project) =>
+			set((state) => {
+				const projects =
+					project.closed === true
+						? state.projects.filter((candidate) => candidate.id !== project.id)
+						: sortProjects(upsertProject(state.projects, project));
+				return {
+					projects,
+					recentProjects: sortProjects(upsertProject(state.recentProjects, project)),
+					...reconcileProjectNavigation(state, projects),
+					...pruneExpandedProjects(state, projects),
+				};
+			}),
+		setWorkspaces: (projectId, workspaces) =>
+			set((s) => ({
 				workspaces: {
 					...s.workspaces,
-					[workspace.projectId]: list.some((w) => w.id === workspace.id)
-						? list.map((w) => (w.id === workspace.id ? { ...w, ...workspace } : w))
-						: [...list, workspace],
+					[projectId]: workspaces.filter((workspace) => !s.removedWorkspaceIds[workspace.id]),
 				},
-			};
-		}),
-	updateWorkspace: (workspace) =>
-		set((s) => {
-			const list = s.workspaces[workspace.projectId];
-			if (!list?.some((w) => w.id === workspace.id)) return {};
-			return {
-				workspaces: {
-					...s.workspaces,
-					[workspace.projectId]: list.map((w) =>
-						w.id === workspace.id
-							? { ...workspace, ...(w.diffStats ? { diffStats: w.diffStats } : {}) }
-							: w,
-					),
-				},
-			};
-		}),
-	removeWorkspace: (projectId, workspaceId) =>
-		set((s) => {
-			const list = s.workspaces[projectId];
-			if (!list) return {};
-			return {
-				workspaces: { ...s.workspaces, [projectId]: list.filter((w) => w.id !== workspaceId) },
-			};
-		}),
-	applyWorkspaceRemoved: (projectId, workspaceId) => {
-		const s = get();
-		const wasActive = s.activeWorkspaceId === workspaceId;
-		const fallbackWorkspace = wasActive ? recentWorkspaceFallback(s, workspaceId) : null;
-		const name = s.workspaces[projectId]?.find((w) => w.id === workspaceId)?.name;
-		set((state) => {
-			const removedSessions = new Set(selectWorkspaceSessionIds(state, workspaceId));
-			return {
-				removedWorkspaceIds: Object.assign(Object.create(null), state.removedWorkspaceIds, {
-					[workspaceId]: true,
-				}) as Record<string, true>,
-				workspaceSelectionHistory: state.workspaceSelectionHistory.filter(
-					(id) => id !== workspaceId,
-				),
-				fsChangesByWorkspace: omitKey(state.fsChangesByWorkspace, workspaceId),
-				activityByWorkspace: omitKey(state.activityByWorkspace, workspaceId),
-				skillChangeTickByWorkspace: omitKey(state.skillChangeTickByWorkspace, workspaceId),
-				specsByWorkspace: omitKey(state.specsByWorkspace, workspaceId),
-				diffScopeByWorkspace: omitKey(state.diffScopeByWorkspace, workspaceId),
-				reviewsByWorkspace: omitKey(state.reviewsByWorkspace, workspaceId),
-				changesRequest:
-					state.changesRequest?.workspaceId === workspaceId ? null : state.changesRequest,
-				specRequest: state.specRequest?.workspaceId === workspaceId ? null : state.specRequest,
-				chatLocationRequest:
-					state.chatLocationRequest?.workspaceId === workspaceId ? null : state.chatLocationRequest,
-				routeChatTarget:
-					state.routeChatTarget?.workspaceId === workspaceId ? null : state.routeChatTarget,
-				historyOpenRequest:
-					state.historyOpenRequest && removedSessions.has(state.historyOpenRequest.sessionId)
-						? null
-						: state.historyOpenRequest,
-				reviewFocusRequest:
-					state.reviewFocusRequest?.workspaceId === workspaceId ? null : state.reviewFocusRequest,
-			};
-		});
-		s.removeWorkspace(projectId, workspaceId);
-		s.clearWorkspaceTabs(workspaceId);
-		if (wasActive) {
-			if (fallbackWorkspace) s.activateWorkspace(fallbackWorkspace);
-			else s.selectProject(projectId);
-			toast.info(`Workspace "${name ?? "?"}" was removed`);
-		}
-	},
-	selectProject: (selectedProjectId, opts) =>
-		set((state) => ({
-			selectedProjectId,
-			activeWorkspaceId: null,
-			...(opts?.reveal
-				? { expandedProjectIds: withExpandedProject(state.expandedProjectIds, selectedProjectId) }
-				: {}),
-		})),
-	toggleProjectExpanded: (projectId) =>
-		set((state) => ({
-			expandedProjectIds: state.expandedProjectIds[projectId]
-				? omitKey(state.expandedProjectIds, projectId)
-				: withExpandedProject(state.expandedProjectIds, projectId),
-		})),
-	expandProject: (projectId) =>
-		set((state) => {
-			const expandedProjectIds = withExpandedProject(state.expandedProjectIds, projectId);
-			return expandedProjectIds === state.expandedProjectIds ? {} : { expandedProjectIds };
-		}),
-	hydrateExpandedProjects: (projectIds) =>
-		set(() => ({
-			expandedProjectIds: Object.fromEntries(projectIds.map((id) => [id, true as const])),
-		})),
-	selectMain: () =>
-		set({ selectedProjectId: null, activeWorkspaceId: null, routeChatTarget: null }),
-	activateWorkspace: (workspace) =>
-		set((state) =>
-			state.removedWorkspaceIds[workspace.id]
-				? {}
-				: {
-						selectedProjectId: workspace.projectId,
-						activeWorkspaceId: workspace.id,
-						workspaceSelectionHistory: withWorkspaceSelected(
-							state.workspaceSelectionHistory,
-							workspace.id,
+			})),
+		addWorkspace: (workspace) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspace.id]) return {};
+				const list = s.workspaces[workspace.projectId];
+				if (!list) return {};
+				return {
+					workspaces: {
+						...s.workspaces,
+						[workspace.projectId]: list.some((w) => w.id === workspace.id)
+							? list.map((w) => (w.id === workspace.id ? { ...w, ...workspace } : w))
+							: [...list, workspace],
+					},
+				};
+			}),
+		updateWorkspace: (workspace) =>
+			set((s) => {
+				const list = s.workspaces[workspace.projectId];
+				if (!list?.some((w) => w.id === workspace.id)) return {};
+				return {
+					workspaces: {
+						...s.workspaces,
+						[workspace.projectId]: list.map((w) =>
+							w.id === workspace.id
+								? { ...workspace, ...(w.diffStats ? { diffStats: w.diffStats } : {}) }
+								: w,
 						),
 					},
-		),
-	activateWorkspaceFromRoute: (workspace, sessionId) =>
-		set((state) => {
-			if (state.removedWorkspaceIds[workspace.id]) return {};
-			const advanced = advanceCenterNavigation(state, workspace.id);
-			return {
-				...advanced.patch,
-				selectedProjectId: workspace.projectId,
-				activeWorkspaceId: workspace.id,
-				workspaceSelectionHistory: withWorkspaceSelected(
-					state.workspaceSelectionHistory,
-					workspace.id,
-				),
-				routeChatTarget: sessionId
-					? {
-							workspaceId: workspace.id,
-							sessionId,
-							navTick: selectWorkspaceNavTick(state, workspace.id) + 1,
-							navigation: advanced.stamp,
-							validated: false,
-						}
-					: null,
-				routeChatTargetGeneration: sessionId
-					? state.routeChatTargetGeneration + 1
-					: state.routeChatTargetGeneration,
-			};
-		}),
-	validateRouteChatTarget: (sessionId) =>
-		set((state) => {
-			const target = state.routeChatTarget;
-			if (!target || target.sessionId !== sessionId || target.validated) return state;
-			return { routeChatTarget: { ...target, validated: true } };
-		}),
-	clearRouteChatTarget: () =>
-		set((state) => (state.routeChatTarget ? { routeChatTarget: null } : state)),
-	hydrateLocalLayoutState: (payload) =>
-		set((state) =>
-			state.layoutStateReady
-				? {}
-				: {
-						workbenchFrame: payload.frame,
-						workspaceViewsByWorkspace: payload.viewsByWorkspace,
-						layoutDocumentsByWorkspace: payload.documentsByWorkspace,
-						layoutAttentionByWorkspace: payload.attentionByWorkspace,
-						localLayoutPreferences: payload.preferences,
-						layoutStateReady: true,
-					},
-		),
-	applyLocalLayoutState: (payload, changedWorkspaceIds, invalidateProjection = false) =>
-		set((state) => {
-			const layoutProjectionEpochByWorkspace = { ...state.layoutProjectionEpochByWorkspace };
-			if (invalidateProjection) {
-				for (const workspaceId of changedWorkspaceIds) {
-					layoutProjectionEpochByWorkspace[workspaceId] =
-						(layoutProjectionEpochByWorkspace[workspaceId] ?? 0) + 1;
-				}
+				};
+			}),
+		removeWorkspace: (projectId, workspaceId) =>
+			set((s) => {
+				const list = s.workspaces[projectId];
+				if (!list) return {};
+				return {
+					workspaces: { ...s.workspaces, [projectId]: list.filter((w) => w.id !== workspaceId) },
+				};
+			}),
+		applyWorkspaceRemoved: (projectId, workspaceId) => {
+			const s = get();
+			const wasActive = s.activeWorkspaceId === workspaceId;
+			const fallbackWorkspace = wasActive ? recentWorkspaceFallback(s, workspaceId) : null;
+			const name = s.workspaces[projectId]?.find((w) => w.id === workspaceId)?.name;
+			set((state) => {
+				const removedSessions = new Set(selectWorkspaceSessionIds(state, workspaceId));
+				return {
+					removedWorkspaceIds: Object.assign(Object.create(null), state.removedWorkspaceIds, {
+						[workspaceId]: true,
+					}) as Record<string, true>,
+					workspaceSelectionHistory: state.workspaceSelectionHistory.filter(
+						(id) => id !== workspaceId,
+					),
+					fsChangesByWorkspace: omitKey(state.fsChangesByWorkspace, workspaceId),
+					activityByWorkspace: omitKey(state.activityByWorkspace, workspaceId),
+					skillChangeTickByWorkspace: omitKey(state.skillChangeTickByWorkspace, workspaceId),
+					specsByWorkspace: omitKey(state.specsByWorkspace, workspaceId),
+					diffScopeByWorkspace: omitKey(state.diffScopeByWorkspace, workspaceId),
+					reviewsByWorkspace: omitKey(state.reviewsByWorkspace, workspaceId),
+					changesRequest:
+						state.changesRequest?.workspaceId === workspaceId ? null : state.changesRequest,
+					specRequest: state.specRequest?.workspaceId === workspaceId ? null : state.specRequest,
+					chatLocationRequest:
+						state.chatLocationRequest?.workspaceId === workspaceId
+							? null
+							: state.chatLocationRequest,
+					routeChatTarget:
+						state.routeChatTarget?.workspaceId === workspaceId ? null : state.routeChatTarget,
+					historyOpenRequest:
+						state.historyOpenRequest && removedSessions.has(state.historyOpenRequest.sessionId)
+							? null
+							: state.historyOpenRequest,
+					reviewFocusRequest:
+						state.reviewFocusRequest?.workspaceId === workspaceId ? null : state.reviewFocusRequest,
+				};
+			});
+			s.removeWorkspace(projectId, workspaceId);
+			s.clearWorkspaceTabs(workspaceId);
+			if (wasActive) {
+				if (fallbackWorkspace) s.activateWorkspace(fallbackWorkspace);
+				else s.selectProject(projectId);
+				toast.info(`Workspace "${name ?? "?"}" was removed`);
 			}
-			return {
-				workbenchFrame: payload.frame,
-				workspaceViewsByWorkspace: payload.viewsByWorkspace,
-				layoutDocumentsByWorkspace: payload.documentsByWorkspace,
-				layoutAttentionByWorkspace: payload.attentionByWorkspace,
-				localLayoutPreferences: payload.preferences,
-				layoutProjectionEpochByWorkspace,
-			};
-		}),
-	setLocalLayoutPreferences: (preferences) => set({ localLayoutPreferences: preferences }),
-	setLayoutAttention: (workspaceId, attention) =>
-		set((state) =>
-			state.removedWorkspaceIds[workspaceId]
-				? {}
-				: {
-						layoutAttentionByWorkspace: {
-							...state.layoutAttentionByWorkspace,
-							[workspaceId]: attention,
+		},
+		selectProject: (selectedProjectId, opts) =>
+			set((state) => ({
+				selectedProjectId,
+				activeWorkspaceId: null,
+				...(opts?.reveal
+					? { expandedProjectIds: withExpandedProject(state.expandedProjectIds, selectedProjectId) }
+					: {}),
+			})),
+		toggleProjectExpanded: (projectId) =>
+			set((state) => ({
+				expandedProjectIds: state.expandedProjectIds[projectId]
+					? omitKey(state.expandedProjectIds, projectId)
+					: withExpandedProject(state.expandedProjectIds, projectId),
+			})),
+		expandProject: (projectId) =>
+			set((state) => {
+				const expandedProjectIds = withExpandedProject(state.expandedProjectIds, projectId);
+				return expandedProjectIds === state.expandedProjectIds ? {} : { expandedProjectIds };
+			}),
+		hydrateExpandedProjects: (projectIds) =>
+			set(() => ({
+				expandedProjectIds: Object.fromEntries(projectIds.map((id) => [id, true as const])),
+			})),
+		selectMain: () =>
+			set({ selectedProjectId: null, activeWorkspaceId: null, routeChatTarget: null }),
+		activateWorkspace: (workspace) =>
+			set((state) =>
+				state.removedWorkspaceIds[workspace.id]
+					? {}
+					: {
+							selectedProjectId: workspace.projectId,
+							activeWorkspaceId: workspace.id,
+							workspaceSelectionHistory: withWorkspaceSelected(
+								state.workspaceSelectionHistory,
+								workspace.id,
+							),
 						},
-					},
-		),
-	syncLegacySelection: (workspaceId, selection) =>
-		set((state) => {
-			if (state.removedWorkspaceIds[workspaceId]) return {};
-			if (selection?.kind === "terminal") {
-				if (
-					!state.terminalsByWorkspace[workspaceId]?.some(
-						(terminal) => terminal.tabKey === selection.tabKey,
-					)
-				) {
-					return {};
-				}
-				if (
-					state.activeTerminalByWorkspace[workspaceId] === selection.tabKey &&
-					state.activeTabByWorkspace[workspaceId] === null
-				) {
-					return {};
+			),
+		activateWorkspaceFromRoute: (workspace, sessionId) =>
+			set((state) => {
+				if (state.removedWorkspaceIds[workspace.id]) return {};
+				const advanced = advanceCenterNavigation(state, workspace.id);
+				return {
+					...advanced.patch,
+					selectedProjectId: workspace.projectId,
+					activeWorkspaceId: workspace.id,
+					workspaceSelectionHistory: withWorkspaceSelected(
+						state.workspaceSelectionHistory,
+						workspace.id,
+					),
+					routeChatTarget: sessionId
+						? {
+								workspaceId: workspace.id,
+								sessionId,
+								navTick: selectWorkspaceNavTick(state, workspace.id) + 1,
+								navigation: advanced.stamp,
+								validated: false,
+							}
+						: null,
+					routeChatTargetGeneration: sessionId
+						? state.routeChatTargetGeneration + 1
+						: state.routeChatTargetGeneration,
+				};
+			}),
+		validateRouteChatTarget: (sessionId) =>
+			set((state) => {
+				const target = state.routeChatTarget;
+				if (!target || target.sessionId !== sessionId || target.validated) return state;
+				return { routeChatTarget: { ...target, validated: true } };
+			}),
+		clearRouteChatTarget: () =>
+			set((state) => (state.routeChatTarget ? { routeChatTarget: null } : state)),
+		hydrateLocalLayoutState: (payload) =>
+			set((state) =>
+				state.layoutStateReady
+					? {}
+					: {
+							workbenchFrame: payload.frame,
+							workspaceViewsByWorkspace: payload.viewsByWorkspace,
+							layoutDocumentsByWorkspace: payload.documentsByWorkspace,
+							layoutAttentionByWorkspace: payload.attentionByWorkspace,
+							localLayoutPreferences: payload.preferences,
+							layoutStateReady: true,
+						},
+			),
+		applyLocalLayoutState: (payload, changedWorkspaceIds, invalidateProjection = false) =>
+			set((state) => {
+				const layoutProjectionEpochByWorkspace = { ...state.layoutProjectionEpochByWorkspace };
+				if (invalidateProjection) {
+					for (const workspaceId of changedWorkspaceIds) {
+						layoutProjectionEpochByWorkspace[workspaceId] =
+							(layoutProjectionEpochByWorkspace[workspaceId] ?? 0) + 1;
+					}
 				}
 				return {
-					activeTerminalByWorkspace: {
-						...state.activeTerminalByWorkspace,
-						[workspaceId]: selection.tabKey,
-					},
-					activeTabByWorkspace: { ...state.activeTabByWorkspace, [workspaceId]: null },
+					workbenchFrame: payload.frame,
+					workspaceViewsByWorkspace: payload.viewsByWorkspace,
+					layoutDocumentsByWorkspace: payload.documentsByWorkspace,
+					layoutAttentionByWorkspace: payload.attentionByWorkspace,
+					localLayoutPreferences: payload.preferences,
+					layoutProjectionEpochByWorkspace,
 				};
-			}
-			if (selection?.kind === "editor") {
-				if (!state.tabsByWorkspace[workspaceId]?.some((tab) => tab.id === selection.tabId)) {
-					return {};
+			}),
+		setLocalLayoutPreferences: (preferences) => set({ localLayoutPreferences: preferences }),
+		setLayoutAttention: (workspaceId, attention) =>
+			set((state) =>
+				state.removedWorkspaceIds[workspaceId]
+					? {}
+					: {
+							layoutAttentionByWorkspace: {
+								...state.layoutAttentionByWorkspace,
+								[workspaceId]: attention,
+							},
+						},
+			),
+		syncLegacySelection: (workspaceId, selection) =>
+			set((state) => {
+				if (state.removedWorkspaceIds[workspaceId]) return {};
+				if (selection?.kind === "terminal") {
+					if (
+						!state.terminalsByWorkspace[workspaceId]?.some(
+							(terminal) => terminal.tabKey === selection.tabKey,
+						)
+					) {
+						return {};
+					}
+					if (
+						state.activeTerminalByWorkspace[workspaceId] === selection.tabKey &&
+						state.activeTabByWorkspace[workspaceId] === null
+					) {
+						return {};
+					}
+					return {
+						activeTerminalByWorkspace: {
+							...state.activeTerminalByWorkspace,
+							[workspaceId]: selection.tabKey,
+						},
+						activeTabByWorkspace: { ...state.activeTabByWorkspace, [workspaceId]: null },
+					};
+				}
+				if (selection?.kind === "editor") {
+					if (!state.tabsByWorkspace[workspaceId]?.some((tab) => tab.id === selection.tabId)) {
+						return {};
+					}
+					if (
+						state.activeTabByWorkspace[workspaceId] === selection.tabId &&
+						state.activeTerminalByWorkspace[workspaceId] === null
+					) {
+						return {};
+					}
+					return {
+						activeTabByWorkspace: {
+							...state.activeTabByWorkspace,
+							[workspaceId]: selection.tabId,
+						},
+						activeTerminalByWorkspace: {
+							...state.activeTerminalByWorkspace,
+							[workspaceId]: null,
+						},
+					};
 				}
 				if (
-					state.activeTabByWorkspace[workspaceId] === selection.tabId &&
+					state.activeTabByWorkspace[workspaceId] === null &&
 					state.activeTerminalByWorkspace[workspaceId] === null
 				) {
 					return {};
 				}
 				return {
-					activeTabByWorkspace: {
-						...state.activeTabByWorkspace,
-						[workspaceId]: selection.tabId,
-					},
+					activeTabByWorkspace: { ...state.activeTabByWorkspace, [workspaceId]: null },
 					activeTerminalByWorkspace: {
 						...state.activeTerminalByWorkspace,
 						[workspaceId]: null,
 					},
 				};
-			}
-			if (
-				state.activeTabByWorkspace[workspaceId] === null &&
-				state.activeTerminalByWorkspace[workspaceId] === null
-			) {
-				return {};
-			}
-			return {
-				activeTabByWorkspace: { ...state.activeTabByWorkspace, [workspaceId]: null },
-				activeTerminalByWorkspace: {
-					...state.activeTerminalByWorkspace,
-					[workspaceId]: null,
-				},
-			};
-		}),
-	enqueueLayoutIntent: (intent) => {
-		const id = randomId("layout-intent");
-		set((state) =>
-			state.removedWorkspaceIds[intent.workspaceId]
-				? {}
-				: { layoutIntents: [...state.layoutIntents, { ...intent, id } as LayoutIntent] },
-		);
-		return id;
-	},
-	consumeLayoutIntent: (id) =>
-		set((state) => ({ layoutIntents: state.layoutIntents.filter((intent) => intent.id !== id) })),
-	openTab: (tab, intent, syncLayout = true, options = {}) =>
-		set((s) => {
-			const wsId = tab.workspaceId;
-			const sessionId = editorSessionId(tab);
-			if (
-				s.removedWorkspaceIds[wsId] ||
-				(sessionId !== null && isSessionDeleted(s, wsId, sessionId))
-			) {
-				return {};
-			}
-			const tabs = s.tabsByWorkspace[wsId] ?? [];
-			const resolvedId = availableEditorTabId(tabs, tab);
-			const resolvedTab = resolvedId === tab.id ? tab : { ...tab, id: resolvedId };
-			const previewCompatible = resolvedTab.kind === "file" || resolvedTab.kind === "diff";
-			const effectiveIntent = previewCompatible ? intent : "keep";
-			const claimPreview = previewCompatible && options.claimPreview === true;
-			const preview = s.previewTabByWorkspace[wsId];
-			const activeTabByWorkspace =
-				options.activate === false
-					? s.activeTabByWorkspace
-					: { ...s.activeTabByWorkspace, [wsId]: resolvedTab.id };
-			const openIntent: LayoutIntentInput = {
-				kind: "open",
-				workspaceId: wsId,
-				tab: resolvedTab,
-				intent: effectiveIntent,
-				...layoutOpenIntentFields(claimPreview ? options : { ...options, claimPreview: false }),
-			};
-			const existingIndex = tabs.findIndex((candidate) => candidate.id === resolvedTab.id);
-			if (existingIndex >= 0) {
-				const existing = tabs[existingIndex];
+			}),
+		enqueueLayoutIntent: (intent) => {
+			const id = randomId("layout-intent");
+			set((state) =>
+				state.removedWorkspaceIds[intent.workspaceId]
+					? {}
+					: { layoutIntents: [...state.layoutIntents, { ...intent, id } as LayoutIntent] },
+			);
+			return id;
+		},
+		consumeLayoutIntent: (id) =>
+			set((state) => ({ layoutIntents: state.layoutIntents.filter((intent) => intent.id !== id) })),
+		openTab: (tab, intent, syncLayout = true, options = {}) =>
+			set((s) => {
+				const wsId = tab.workspaceId;
+				const sessionId = editorSessionId(tab);
+				if (
+					s.removedWorkspaceIds[wsId] ||
+					(sessionId !== null && isSessionDeleted(s, wsId, sessionId))
+				) {
+					return {};
+				}
+				const tabs = s.tabsByWorkspace[wsId] ?? [];
+				const resolvedId = availableEditorTabId(tabs, tab);
+				const resolvedTab = resolvedId === tab.id ? tab : { ...tab, id: resolvedId };
+				const previewCompatible = resolvedTab.kind === "file" || resolvedTab.kind === "diff";
+				const effectiveIntent = previewCompatible ? intent : "keep";
+				const claimPreview = previewCompatible && options.claimPreview === true;
+				const preview = s.previewTabByWorkspace[wsId];
+				const activeTabByWorkspace =
+					options.activate === false
+						? s.activeTabByWorkspace
+						: { ...s.activeTabByWorkspace, [wsId]: resolvedTab.id };
+				const openIntent: LayoutIntentInput = {
+					kind: "open",
+					workspaceId: wsId,
+					tab: resolvedTab,
+					intent: effectiveIntent,
+					...layoutOpenIntentFields(claimPreview ? options : { ...options, claimPreview: false }),
+				};
+				const existingIndex = tabs.findIndex((candidate) => candidate.id === resolvedTab.id);
+				if (existingIndex >= 0) {
+					const existing = tabs[existingIndex];
+					return {
+						...(syncLayout
+							? {
+									layoutIntents: appendLayoutIntent(s.layoutIntents, openIntent),
+								}
+							: {}),
+						tabsByWorkspace:
+							existing === resolvedTab
+								? s.tabsByWorkspace
+								: { ...s.tabsByWorkspace, [wsId]: tabs.with(existingIndex, resolvedTab) },
+						activeTabByWorkspace,
+						previewTabByWorkspace:
+							effectiveIntent === "keep" &&
+							(preview === resolvedTab.id || (claimPreview && preview !== undefined))
+								? omitKey(s.previewTabByWorkspace, wsId)
+								: s.previewTabByWorkspace,
+					};
+				}
+				const at =
+					!s.layoutDocumentsByWorkspace[wsId] &&
+					(effectiveIntent === "preview" || claimPreview) &&
+					preview
+						? tabs.findIndex((t) => t.id === preview)
+						: -1;
 				return {
 					...(syncLayout
 						? {
 								layoutIntents: appendLayoutIntent(s.layoutIntents, openIntent),
 							}
 						: {}),
-					tabsByWorkspace:
-						existing === resolvedTab
-							? s.tabsByWorkspace
-							: { ...s.tabsByWorkspace, [wsId]: tabs.with(existingIndex, resolvedTab) },
+					tabsByWorkspace: {
+						...s.tabsByWorkspace,
+						[wsId]: at === -1 ? [...tabs, resolvedTab] : tabs.with(at, resolvedTab),
+					},
 					activeTabByWorkspace,
 					previewTabByWorkspace:
-						effectiveIntent === "keep" &&
-						(preview === resolvedTab.id || (claimPreview && preview !== undefined))
-							? omitKey(s.previewTabByWorkspace, wsId)
-							: s.previewTabByWorkspace,
+						effectiveIntent === "preview"
+							? { ...s.previewTabByWorkspace, [wsId]: resolvedTab.id }
+							: claimPreview && preview
+								? omitKey(s.previewTabByWorkspace, wsId)
+								: s.previewTabByWorkspace,
 				};
-			}
-			const at =
-				!s.layoutDocumentsByWorkspace[wsId] &&
-				(effectiveIntent === "preview" || claimPreview) &&
-				preview
-					? tabs.findIndex((t) => t.id === preview)
-					: -1;
-			return {
-				...(syncLayout
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, openIntent),
-						}
-					: {}),
-				tabsByWorkspace: {
-					...s.tabsByWorkspace,
-					[wsId]: at === -1 ? [...tabs, resolvedTab] : tabs.with(at, resolvedTab),
-				},
-				activeTabByWorkspace,
-				previewTabByWorkspace:
-					effectiveIntent === "preview"
-						? { ...s.previewTabByWorkspace, [wsId]: resolvedTab.id }
-						: claimPreview && preview
-							? omitKey(s.previewTabByWorkspace, wsId)
-							: s.previewTabByWorkspace,
-			};
-		}),
-	openDoc: (tab) =>
-		set((s) => {
-			const sessionId = editorSessionId(tab);
-			if (
-				s.removedWorkspaceIds[tab.workspaceId] ||
-				(sessionId !== null && isSessionDeleted(s, tab.workspaceId, sessionId))
-			) {
-				return {};
-			}
-			const tabs = s.tabsByWorkspace[tab.workspaceId] ?? [];
-			const existing = tabs.find(
-				(candidate) => editorResourceIdentity(candidate) === editorResourceIdentity(tab),
-			);
-			const id = availableEditorTabId(tabs, tab);
-			const resolvedTab = id === tab.id ? tab : { ...tab, id };
-			const navigation = advanceCenterNavigation(s, tab.workspaceId);
-			return {
-				...navigation.patch,
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "open",
-					workspaceId: tab.workspaceId,
-					tab: resolvedTab,
-					intent: "keep",
-					...(navigation.stamp ? { targetGroupId: navigation.stamp.groupId } : {}),
-					navigation: navigation.stamp,
-				}),
-				tabsByWorkspace: {
-					...s.tabsByWorkspace,
-					[tab.workspaceId]: existing
-						? tabs.map((candidate) => (candidate === existing ? resolvedTab : candidate))
-						: [...tabs, resolvedTab],
-				},
-				activeTabByWorkspace: { ...s.activeTabByWorkspace, [tab.workspaceId]: resolvedTab.id },
-			};
-		}),
-	closeTab: (id, syncLayout = true, countNavigation = true, workspaceId) =>
-		set((s) => {
-			const wsId = workspaceId ?? s.activeWorkspaceId;
-			if (!wsId || s.removedWorkspaceIds[wsId]) return {};
-			const tabs = (s.tabsByWorkspace[wsId] ?? []).filter((t) => t.id !== id);
-			const wasActive = s.activeTabByWorkspace[wsId] === id;
-			return {
-				...(syncLayout
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, {
-								kind: "close",
-								workspaceId: wsId,
-								tabId: id,
-							}),
-						}
-					: {}),
-				tabsByWorkspace: { ...s.tabsByWorkspace, [wsId]: tabs },
-				activeTabByWorkspace: {
-					...s.activeTabByWorkspace,
-					[wsId]: wasActive ? (tabs.at(-1)?.id ?? null) : (s.activeTabByWorkspace[wsId] ?? null),
-				},
-				navTickByWorkspace: wasActive && countNavigation ? bumpNav(s, wsId) : s.navTickByWorkspace,
-				...(s.previewTabByWorkspace[wsId] === id
-					? { previewTabByWorkspace: omitKey(s.previewTabByWorkspace, wsId) }
-					: {}),
-			};
-		}),
-	setActiveTab: (id, intent, syncLayout = true) =>
-		set((s) => {
-			const wsId = s.activeWorkspaceId;
-			if (!wsId) return {};
-			return {
-				...(syncLayout
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, {
-								kind: "select",
-								workspaceId: wsId,
-								tabId: id,
-								...(intent === "keep" ? { keep: true } : {}),
-							}),
-						}
-					: {}),
-				activeTabByWorkspace: { ...s.activeTabByWorkspace, [wsId]: id },
-				navTickByWorkspace: bumpNav(s, wsId),
-				...(intent === "keep" && s.previewTabByWorkspace[wsId] === id
-					? { previewTabByWorkspace: omitKey(s.previewTabByWorkspace, wsId) }
-					: {}),
-			};
-		}),
-	beginCenterNavigation: (workspaceId, preferredGroupId) => {
-		let stamp: CenterNavigationStamp | null = null;
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const advanced = advanceCenterNavigation(s, workspaceId, preferredGroupId);
-			stamp = advanced.stamp;
-			return advanced.patch;
-		});
-		return stamp;
-	},
-	noteNavigation: (workspaceId) =>
-		set((s) =>
-			s.removedWorkspaceIds[workspaceId] ? {} : { navTickByWorkspace: bumpNav(s, workspaceId) },
-		),
-	setFileTabView: (id, view) =>
-		set((s) => {
-			const wsId = s.activeWorkspaceId;
-			if (!wsId) return {};
-			const tabs = s.tabsByWorkspace[wsId] ?? [];
-			if (!tabs.some((t) => t.id === id && t.kind === "file")) return {};
-			return {
-				tabsByWorkspace: {
-					...s.tabsByWorkspace,
-					[wsId]: tabs.map((t) => (t.id === id && t.kind === "file" ? { ...t, view } : t)),
-				},
-			};
-		}),
-	setDiffTabView: (id, view) => set((s) => patchDiffTab(s, id, { view })),
-	setDiffTabRendered: (id, rendered) => set((s) => patchDiffTab(s, id, { rendered })),
-	setDiffTabIgnoreWhitespace: (id, ignoreWhitespace) =>
-		set((s) => patchDiffTab(s, id, { ignoreWhitespace })),
-	setChangesView: (view) => set({ changesView: view }),
-	setDiffScope: (workspaceId, scope) =>
-		set((s) =>
-			s.removedWorkspaceIds[workspaceId]
-				? {}
-				: { diffScopeByWorkspace: { ...s.diffScopeByWorkspace, [workspaceId]: scope } },
-		),
-	noteFsChanged: (payload) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[payload.workspaceId]) return {};
-			const prev = s.fsChangesByWorkspace[payload.workspaceId];
-			const tick = (prev?.tick ?? 0) + 1;
-			const skillChanged = payload.skillChange !== "none";
-			return {
-				fsChangesByWorkspace: {
-					...s.fsChangesByWorkspace,
-					[payload.workspaceId]: { tick, paths: payload.paths, truncated: payload.truncated },
-				},
-				...(skillChanged
-					? {
-							skillChangeTickByWorkspace: {
-								...s.skillChangeTickByWorkspace,
-								[payload.workspaceId]: tick,
-							},
-						}
-					: {}),
-			};
-		}),
-	markSkillsSynced: (sessionId, syncedTick) =>
-		set((s) => {
-			if (!s.sessions[sessionId]) return {};
-			const synced = Math.max(s.skillsSyncedTickBySession[sessionId] ?? 0, syncedTick);
-			return {
-				skillsSyncedTickBySession: { ...s.skillsSyncedTickBySession, [sessionId]: synced },
-			};
-		}),
-	updateFileTabContent: (workspaceId, id, content, tick) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const tabs = s.tabsByWorkspace[workspaceId] ?? [];
-			if (!tabs.some((tab) => tab.id === id && tab.kind === "file")) return {};
-			return {
-				tabsByWorkspace: {
-					...s.tabsByWorkspace,
-					[workspaceId]: tabs.map((tab) =>
-						tab.id === id && tab.kind === "file" ? { ...tab, content, loadedTick: tick } : tab,
-					),
-				},
-			};
-		}),
-	updateDiffTabContent: (workspaceId, id, original, modified, tick, loadedTarget) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const tabs = s.tabsByWorkspace[workspaceId] ?? [];
-			if (!tabs.some((tab) => tab.id === id && tab.kind === "diff")) return {};
-			return {
-				tabsByWorkspace: {
-					...s.tabsByWorkspace,
-					[workspaceId]: tabs.map((tab) =>
-						tab.id === id && tab.kind === "diff"
-							? { ...tab, original, modified, loadedTick: tick, loadedTarget }
-							: tab,
-					),
-				},
-			};
-		}),
-	clearWorkspaceTabs: (workspaceId) =>
-		set((s) => {
-			const sessions = { ...s.sessions };
-			const skillsSyncedTickBySession = { ...s.skillsSyncedTickBySession };
-			for (const sessionId of selectWorkspaceSessionIds(s, workspaceId)) {
-				delete sessions[sessionId];
-				delete skillsSyncedTickBySession[sessionId];
-			}
-			return {
-				workspaceViewsByWorkspace: omitKey(s.workspaceViewsByWorkspace, workspaceId),
-				layoutDocumentsByWorkspace: omitKey(s.layoutDocumentsByWorkspace, workspaceId),
-				layoutAttentionByWorkspace: omitKey(s.layoutAttentionByWorkspace, workspaceId),
-				layoutProjectionEpochByWorkspace: omitKey(s.layoutProjectionEpochByWorkspace, workspaceId),
-				layoutIntents: s.layoutIntents.filter((intent) => intent.workspaceId !== workspaceId),
-				tabsByWorkspace: omitKey(s.tabsByWorkspace, workspaceId),
-				activeTabByWorkspace: omitKey(s.activeTabByWorkspace, workspaceId),
-				previewTabByWorkspace: omitKey(s.previewTabByWorkspace, workspaceId),
-				navTickByWorkspace: omitKey(s.navTickByWorkspace, workspaceId),
-				closedChatsByWorkspace: omitKey(s.closedChatsByWorkspace, workspaceId),
-				chatStartsByWorkspace: omitKey(s.chatStartsByWorkspace, workspaceId),
-				terminalsByWorkspace: omitKey(s.terminalsByWorkspace, workspaceId),
-				activeTerminalByWorkspace: omitKey(s.activeTerminalByWorkspace, workspaceId),
-				sessions,
-				skillsSyncedTickBySession,
-			};
-		}),
-	addTerminal: (
-		workspaceId,
-		initialCommand,
-		targetGroupId,
-		targetArea = "center",
-		reveal = true,
-		requestedTabKey,
-	) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const list = s.terminalsByWorkspace[workspaceId] ?? [];
-			const tabKey = requestedTabKey ?? randomId("terminal");
-			if (list.some((tab) => tab.tabKey === tabKey)) return {};
-			const navigation =
-				targetGroupId && targetArea === "center"
-					? advanceCenterNavigation(s, workspaceId, targetGroupId)
-					: null;
-			const tab: TerminalTab = {
-				tabKey,
-				workspaceId,
-				title: nextTerminalTitle(list),
-				reservationPending: true,
-				...(initialCommand ? { initialCommand } : {}),
-			};
-			return {
-				...(navigation?.patch ?? {}),
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "place-terminal",
-					workspaceId,
-					tabKey,
-					title: tab.title,
-					...(targetGroupId
+			}),
+		openDoc: (tab) =>
+			set((s) => {
+				const sessionId = editorSessionId(tab);
+				if (
+					s.removedWorkspaceIds[tab.workspaceId] ||
+					(sessionId !== null && isSessionDeleted(s, tab.workspaceId, sessionId))
+				) {
+					return {};
+				}
+				const tabs = s.tabsByWorkspace[tab.workspaceId] ?? [];
+				const existing = tabs.find(
+					(candidate) => editorResourceIdentity(candidate) === editorResourceIdentity(tab),
+				);
+				const id = availableEditorTabId(tabs, tab);
+				const resolvedTab = id === tab.id ? tab : { ...tab, id };
+				const navigation = advanceCenterNavigation(s, tab.workspaceId);
+				return {
+					...navigation.patch,
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "open",
+						workspaceId: tab.workspaceId,
+						tab: resolvedTab,
+						intent: "keep",
+						...(navigation.stamp ? { targetGroupId: navigation.stamp.groupId } : {}),
+						navigation: navigation.stamp,
+					}),
+					tabsByWorkspace: {
+						...s.tabsByWorkspace,
+						[tab.workspaceId]: existing
+							? tabs.map((candidate) => (candidate === existing ? resolvedTab : candidate))
+							: [...tabs, resolvedTab],
+					},
+					activeTabByWorkspace: { ...s.activeTabByWorkspace, [tab.workspaceId]: resolvedTab.id },
+				};
+			}),
+		closeTab: (id, syncLayout = true, countNavigation = true, workspaceId) =>
+			set((s) => {
+				const wsId = workspaceId ?? s.activeWorkspaceId;
+				if (!wsId || s.removedWorkspaceIds[wsId]) return {};
+				const tabs = (s.tabsByWorkspace[wsId] ?? []).filter((t) => t.id !== id);
+				const wasActive = s.activeTabByWorkspace[wsId] === id;
+				return {
+					...(syncLayout
 						? {
-								targetGroupId,
-								...(targetArea !== "center" ? { targetArea } : {}),
-								...(targetArea === "center" ? { navigation: navigation?.stamp ?? null } : {}),
+								layoutIntents: appendLayoutIntent(s.layoutIntents, {
+									kind: "close",
+									workspaceId: wsId,
+									tabId: id,
+								}),
 							}
 						: {}),
-					...(reveal ? {} : { reveal: false as const }),
-				}),
-				terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: [...list, tab] },
-				activeTerminalByWorkspace: { ...s.activeTerminalByWorkspace, [workspaceId]: tabKey },
-			};
-		}),
-	setWorkspaceTerminals: (workspaceId, tabs) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const local = s.terminalsByWorkspace[workspaceId] ?? [];
-			const known = new Set(tabs.map((tab) => tab.tabKey));
-			const pending = local.filter((tab) => !known.has(tab.tabKey) && tab.reservationPending);
-			const merged: TerminalTab[] = [
-				...tabs.map((tab) => {
-					const existing = local.find((candidate) => candidate.tabKey === tab.tabKey);
-					return {
-						tabKey: tab.tabKey,
+					tabsByWorkspace: { ...s.tabsByWorkspace, [wsId]: tabs },
+					activeTabByWorkspace: {
+						...s.activeTabByWorkspace,
+						[wsId]: wasActive ? (tabs.at(-1)?.id ?? null) : (s.activeTabByWorkspace[wsId] ?? null),
+					},
+					navTickByWorkspace:
+						wasActive && countNavigation ? bumpNav(s, wsId) : s.navTickByWorkspace,
+					...(s.previewTabByWorkspace[wsId] === id
+						? { previewTabByWorkspace: omitKey(s.previewTabByWorkspace, wsId) }
+						: {}),
+				};
+			}),
+		setActiveTab: (id, intent, syncLayout = true) =>
+			set((s) => {
+				const wsId = s.activeWorkspaceId;
+				if (!wsId) return {};
+				return {
+					...(syncLayout
+						? {
+								layoutIntents: appendLayoutIntent(s.layoutIntents, {
+									kind: "select",
+									workspaceId: wsId,
+									tabId: id,
+									...(intent === "keep" ? { keep: true } : {}),
+								}),
+							}
+						: {}),
+					activeTabByWorkspace: { ...s.activeTabByWorkspace, [wsId]: id },
+					navTickByWorkspace: bumpNav(s, wsId),
+					...(intent === "keep" && s.previewTabByWorkspace[wsId] === id
+						? { previewTabByWorkspace: omitKey(s.previewTabByWorkspace, wsId) }
+						: {}),
+				};
+			}),
+		beginCenterNavigation: (workspaceId, preferredGroupId) => {
+			let stamp: CenterNavigationStamp | null = null;
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const advanced = advanceCenterNavigation(s, workspaceId, preferredGroupId);
+				stamp = advanced.stamp;
+				return advanced.patch;
+			});
+			return stamp;
+		},
+		noteNavigation: (workspaceId) =>
+			set((s) =>
+				s.removedWorkspaceIds[workspaceId] ? {} : { navTickByWorkspace: bumpNav(s, workspaceId) },
+			),
+		setFileTabView: (id, view) =>
+			set((s) => {
+				const wsId = s.activeWorkspaceId;
+				if (!wsId) return {};
+				const tabs = s.tabsByWorkspace[wsId] ?? [];
+				if (!tabs.some((t) => t.id === id && t.kind === "file")) return {};
+				return {
+					tabsByWorkspace: {
+						...s.tabsByWorkspace,
+						[wsId]: tabs.map((t) => (t.id === id && t.kind === "file" ? { ...t, view } : t)),
+					},
+				};
+			}),
+		setDiffTabView: (id, view) => set((s) => patchDiffTab(s, id, { view })),
+		setDiffTabRendered: (id, rendered) => set((s) => patchDiffTab(s, id, { rendered })),
+		setDiffTabIgnoreWhitespace: (id, ignoreWhitespace) =>
+			set((s) => patchDiffTab(s, id, { ignoreWhitespace })),
+		setChangesView: (view) => set({ changesView: view }),
+		setDiffScope: (workspaceId, scope) =>
+			set((s) =>
+				s.removedWorkspaceIds[workspaceId]
+					? {}
+					: { diffScopeByWorkspace: { ...s.diffScopeByWorkspace, [workspaceId]: scope } },
+			),
+		noteFsChanged: (payload) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[payload.workspaceId]) return {};
+				const prev = s.fsChangesByWorkspace[payload.workspaceId];
+				const tick = (prev?.tick ?? 0) + 1;
+				const skillChanged = payload.skillChange !== "none";
+				return {
+					fsChangesByWorkspace: {
+						...s.fsChangesByWorkspace,
+						[payload.workspaceId]: { tick, paths: payload.paths, truncated: payload.truncated },
+					},
+					...(skillChanged
+						? {
+								skillChangeTickByWorkspace: {
+									...s.skillChangeTickByWorkspace,
+									[payload.workspaceId]: tick,
+								},
+							}
+						: {}),
+				};
+			}),
+		markSkillsSynced: (sessionId, syncedTick) =>
+			set((s) => {
+				if (!s.sessions[sessionId]) return {};
+				const synced = Math.max(s.skillsSyncedTickBySession[sessionId] ?? 0, syncedTick);
+				return {
+					skillsSyncedTickBySession: { ...s.skillsSyncedTickBySession, [sessionId]: synced },
+				};
+			}),
+		updateFileTabContent: (workspaceId, id, content, tick) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
+				if (!tabs.some((tab) => tab.id === id && tab.kind === "file")) return {};
+				return {
+					tabsByWorkspace: {
+						...s.tabsByWorkspace,
+						[workspaceId]: tabs.map((tab) =>
+							tab.id === id && tab.kind === "file" ? { ...tab, content, loadedTick: tick } : tab,
+						),
+					},
+				};
+			}),
+		updateDiffTabContent: (workspaceId, id, original, modified, tick, loadedTarget) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
+				if (!tabs.some((tab) => tab.id === id && tab.kind === "diff")) return {};
+				return {
+					tabsByWorkspace: {
+						...s.tabsByWorkspace,
+						[workspaceId]: tabs.map((tab) =>
+							tab.id === id && tab.kind === "diff"
+								? { ...tab, original, modified, loadedTick: tick, loadedTarget }
+								: tab,
+						),
+					},
+				};
+			}),
+		clearWorkspaceTabs: (workspaceId) =>
+			set((s) => {
+				const sessions = { ...s.sessions };
+				const skillsSyncedTickBySession = { ...s.skillsSyncedTickBySession };
+				for (const sessionId of selectWorkspaceSessionIds(s, workspaceId)) {
+					delete sessions[sessionId];
+					delete skillsSyncedTickBySession[sessionId];
+				}
+				return {
+					workspaceViewsByWorkspace: omitKey(s.workspaceViewsByWorkspace, workspaceId),
+					layoutDocumentsByWorkspace: omitKey(s.layoutDocumentsByWorkspace, workspaceId),
+					layoutAttentionByWorkspace: omitKey(s.layoutAttentionByWorkspace, workspaceId),
+					layoutProjectionEpochByWorkspace: omitKey(
+						s.layoutProjectionEpochByWorkspace,
 						workspaceId,
+					),
+					layoutIntents: s.layoutIntents.filter((intent) => intent.workspaceId !== workspaceId),
+					tabsByWorkspace: omitKey(s.tabsByWorkspace, workspaceId),
+					activeTabByWorkspace: omitKey(s.activeTabByWorkspace, workspaceId),
+					previewTabByWorkspace: omitKey(s.previewTabByWorkspace, workspaceId),
+					navTickByWorkspace: omitKey(s.navTickByWorkspace, workspaceId),
+					closedChatsByWorkspace: omitKey(s.closedChatsByWorkspace, workspaceId),
+					chatStartsByWorkspace: omitKey(s.chatStartsByWorkspace, workspaceId),
+					terminalsByWorkspace: omitKey(s.terminalsByWorkspace, workspaceId),
+					activeTerminalByWorkspace: omitKey(s.activeTerminalByWorkspace, workspaceId),
+					sessions,
+					skillsSyncedTickBySession,
+				};
+			}),
+		addTerminal: (
+			workspaceId,
+			initialCommand,
+			targetGroupId,
+			targetArea = "center",
+			reveal = true,
+			requestedTabKey,
+		) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const list = s.terminalsByWorkspace[workspaceId] ?? [];
+				const tabKey = requestedTabKey ?? randomId("terminal");
+				if (list.some((tab) => tab.tabKey === tabKey)) return {};
+				const navigation =
+					targetGroupId && targetArea === "center"
+						? advanceCenterNavigation(s, workspaceId, targetGroupId)
+						: null;
+				const tab: TerminalTab = {
+					tabKey,
+					workspaceId,
+					title: nextTerminalTitle(list),
+					reservationPending: true,
+					...(initialCommand ? { initialCommand } : {}),
+				};
+				return {
+					...(navigation?.patch ?? {}),
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "place-terminal",
+						workspaceId,
+						tabKey,
 						title: tab.title,
-						...(existing?.initialCommand ? { initialCommand: existing.initialCommand } : {}),
-					};
-				}),
-				...pending,
-			];
-			const active = s.activeTerminalByWorkspace[workspaceId] ?? null;
-			const activeSurvives = merged.some((tab) => tab.tabKey === active);
-			return {
-				terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: merged },
-				activeTerminalByWorkspace: {
-					...s.activeTerminalByWorkspace,
-					[workspaceId]: activeSurvives ? active : (merged.at(-1)?.tabKey ?? null),
-				},
-			};
-		}),
-	confirmTerminalReservation: (workspaceId, tabKey) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const list = s.terminalsByWorkspace[workspaceId] ?? [];
-			if (!list.some((tab) => tab.tabKey === tabKey && tab.reservationPending)) return s;
-			return {
-				terminalsByWorkspace: {
-					...s.terminalsByWorkspace,
-					[workspaceId]: list.map(({ reservationPending, ...rest }) =>
-						rest.tabKey === tabKey
-							? rest
-							: { ...rest, ...(reservationPending ? { reservationPending } : {}) },
-					),
-				},
-			};
-		}),
-	rejectTerminalReservation: (workspaceId, tabKey) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const list = s.terminalsByWorkspace[workspaceId] ?? [];
-			if (!list.some((tab) => tab.tabKey === tabKey && tab.reservationPending)) return s;
-			const terminals = list.filter((tab) => tab.tabKey !== tabKey);
-			const active = s.activeTerminalByWorkspace[workspaceId] ?? null;
-			return {
-				terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: terminals },
-				activeTerminalByWorkspace: {
-					...s.activeTerminalByWorkspace,
-					[workspaceId]: active === tabKey ? (terminals.at(-1)?.tabKey ?? null) : active,
-				},
-				layoutIntents: s.layoutIntents.filter(
-					(intent) =>
-						intent.kind !== "place-terminal" ||
-						intent.workspaceId !== workspaceId ||
-						intent.tabKey !== tabKey,
-				),
-			};
-		}),
-	consumeTerminalInitialCommand: (workspaceId, tabKey) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const list = s.terminalsByWorkspace[workspaceId] ?? [];
-			if (!list.some((t) => t.tabKey === tabKey && t.initialCommand)) return s;
-			return {
-				terminalsByWorkspace: {
-					...s.terminalsByWorkspace,
-					[workspaceId]: list.map(({ initialCommand, ...rest }) =>
-						rest.tabKey === tabKey
-							? rest
-							: { ...rest, ...(initialCommand ? { initialCommand } : {}) },
-					),
-				},
-			};
-		}),
-	closeTerminalTab: (workspaceId, tabKey, syncLayout = true) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const list = (s.terminalsByWorkspace[workspaceId] ?? []).filter((t) => t.tabKey !== tabKey);
-			const wasActive = s.activeTerminalByWorkspace[workspaceId] === tabKey;
-			return {
-				...(syncLayout
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, {
-								kind: "close-terminal",
-								workspaceId,
-								tabKey,
-							}),
-						}
-					: {}),
-				terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: list },
-				activeTerminalByWorkspace: {
-					...s.activeTerminalByWorkspace,
-					[workspaceId]: wasActive
-						? (list.at(-1)?.tabKey ?? null)
-						: (s.activeTerminalByWorkspace[workspaceId] ?? null),
-				},
-			};
-		}),
-	setActiveTerminalTab: (workspaceId, tabKey, syncLayout = true) =>
-		set((s) =>
-			s.removedWorkspaceIds[workspaceId]
-				? {}
-				: {
-						...(syncLayout
+						...(targetGroupId
 							? {
-									layoutIntents: appendLayoutIntent(s.layoutIntents, {
-										kind: "select-terminal",
-										workspaceId,
-										tabKey,
-									}),
+									targetGroupId,
+									...(targetArea !== "center" ? { targetArea } : {}),
+									...(targetArea === "center" ? { navigation: navigation?.stamp ?? null } : {}),
 								}
 							: {}),
-						activeTerminalByWorkspace: { ...s.activeTerminalByWorkspace, [workspaceId]: tabKey },
-					},
-		),
-	beginWorktreeCreation: (projectId) =>
-		set((s) => ({
-			worktreeCreationsByProject: {
-				...s.worktreeCreationsByProject,
-				[projectId]: (s.worktreeCreationsByProject[projectId] ?? 0) + 1,
-			},
-		})),
-	endWorktreeCreation: (projectId) =>
-		set((s) => {
-			const remaining = (s.worktreeCreationsByProject[projectId] ?? 0) - 1;
-			return {
-				worktreeCreationsByProject:
-					remaining > 0
-						? { ...s.worktreeCreationsByProject, [projectId]: remaining }
-						: omitKey(s.worktreeCreationsByProject, projectId),
-			};
-		}),
-	beginChatStart: (workspaceId) =>
-		set((s) => ({
-			chatStartsByWorkspace: {
-				...s.chatStartsByWorkspace,
-				[workspaceId]: (s.chatStartsByWorkspace[workspaceId] ?? 0) + 1,
-			},
-		})),
-	endChatStart: (workspaceId) =>
-		set((s) => {
-			const remaining = (s.chatStartsByWorkspace[workspaceId] ?? 0) - 1;
-			return {
-				chatStartsByWorkspace:
-					remaining > 0
-						? { ...s.chatStartsByWorkspace, [workspaceId]: remaining }
-						: omitKey(s.chatStartsByWorkspace, workspaceId),
-			};
-		}),
-	openChatSession: (workspaceId, sessionId, model, thinkingLevel, syncedTick, options = {}) => {
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId] || isSessionDeleted(s, workspaceId, sessionId)) {
-				return {};
-			}
-			const tabs = s.tabsByWorkspace[workspaceId] ?? [];
-			const existing = tabs.find(
-				(candidate): candidate is ChatTab =>
-					candidate.kind === "chat" && candidate.sessionId === sessionId,
-			);
-			const preferred: ChatTab = existing ?? {
-				kind: "chat",
-				id: chatTabId(workspaceId, sessionId),
-				workspaceId,
-				name: "Chat",
-				sessionId,
-			};
-			const id = existing?.id ?? availableEditorTabId(tabs, preferred);
-			const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
-			const fresh = !s.sessions[sessionId];
-			const history = s.closedChatsByWorkspace[workspaceId] ?? [];
-			const inHistory = history.some((entry) => entry.sessionId === sessionId);
-			return {
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "open",
-					workspaceId,
-					tab,
-					intent: "keep",
-					...layoutOpenIntentFields(options),
-				}),
-				tabsByWorkspace: existing
-					? s.tabsByWorkspace
-					: { ...s.tabsByWorkspace, [workspaceId]: [...tabs, tab] },
-				closedChatsByWorkspace: inHistory
-					? {
-							...s.closedChatsByWorkspace,
-							[workspaceId]: history.filter((entry) => entry.sessionId !== sessionId),
-						}
-					: s.closedChatsByWorkspace,
-				activeTabByWorkspace:
-					options.activate === false
-						? s.activeTabByWorkspace
-						: { ...s.activeTabByWorkspace, [workspaceId]: id },
-				navTickByWorkspace:
-					options.activate === false || navigationCountedAtRequest(options)
-						? s.navTickByWorkspace
-						: bumpNav(s, workspaceId),
-				sessions: fresh
-					? {
-							...s.sessions,
-							[sessionId]: newRuntime(model, thinkingLevel, s.connectionGeneration),
-						}
-					: s.sessions,
-				...(fresh
-					? {
-							skillsSyncedTickBySession: {
-								...s.skillsSyncedTickBySession,
-								[sessionId]: syncedTick ?? selectWorkspaceTick(s, workspaceId),
-							},
-						}
-					: {}),
-			};
-		});
-		replayExtUiOrphans(sessionId, set, get);
-	},
-	closeChatRuntime: (sessionId) =>
-		set((s) => {
-			if (!s.sessions[sessionId]) return {};
-			return {
-				sessions: omitKey(s.sessions, sessionId),
-				skillsSyncedTickBySession: omitKey(s.skillsSyncedTickBySession, sessionId),
-			};
-		}),
-	closeChatToHistory: (sessionId, syncLayout = true, workspaceId, countNavigation = true) =>
-		set((s) => {
-			const wsId = workspaceId ?? s.activeWorkspaceId;
-			if (!wsId || s.removedWorkspaceIds[wsId]) return {};
-			const tabs = s.tabsByWorkspace[wsId] ?? [];
-			const tab = tabs.find((t) => t.kind === "chat" && t.sessionId === sessionId);
-			if (!tab) return {};
-			const remaining = tabs.filter((t) => t.id !== tab.id);
-			const wasActive = s.activeTabByWorkspace[wsId] === tab.id;
-			const entry: ClosedChat = { sessionId, title: tab.name, closedAt: Date.now() };
-			const targetsLocation =
-				s.chatLocationRequest?.workspaceId === wsId &&
-				s.chatLocationRequest.sessionId === sessionId;
-			const targetsHistory = s.historyOpenRequest?.sessionId === sessionId;
-			return {
-				...(syncLayout
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, {
-								kind: "close",
-								workspaceId: wsId,
-								tabId: tab.id,
-							}),
-						}
-					: {}),
-				tabsByWorkspace: { ...s.tabsByWorkspace, [wsId]: remaining },
-				navTickByWorkspace: wasActive && countNavigation ? bumpNav(s, wsId) : s.navTickByWorkspace,
-				activeTabByWorkspace: {
-					...s.activeTabByWorkspace,
-					[wsId]: wasActive
-						? (remaining.at(-1)?.id ?? null)
-						: (s.activeTabByWorkspace[wsId] ?? null),
-				},
-				closedChatsByWorkspace: {
-					...s.closedChatsByWorkspace,
-					[wsId]: [entry, ...(s.closedChatsByWorkspace[wsId] ?? [])],
-				},
-				...(targetsLocation ? { chatLocationRequest: null } : {}),
-				...(targetsHistory ? { historyOpenRequest: null } : {}),
-			};
-		}),
-	deleteChat: (workspaceId, sessionId, countNavigation = true) =>
-		set((s) => withoutChat(s, workspaceId, sessionId, countNavigation)),
-	reconcileWorkspaceSessions: (workspaceId, baselineSessionIds, authoritativeSessionIds) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const authoritative = new Set(authoritativeSessionIds);
-			let next = s;
-			for (const sessionId of baselineSessionIds) {
-				if (!authoritative.has(sessionId)) {
-					next = withoutChat(next, workspaceId, sessionId, false);
-				}
-			}
-			return next;
-		}),
-	reopenChat: (wsId, sessionId, options = {}) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[wsId] || isSessionDeleted(s, wsId, sessionId)) return {};
-			const closed = s.closedChatsByWorkspace[wsId] ?? [];
-			const entry = closed.find((c) => c.sessionId === sessionId);
-			if (!entry) return {};
-			const tabs = s.tabsByWorkspace[wsId] ?? [];
-			const existing = tabs.find(
-				(candidate): candidate is ChatTab =>
-					candidate.kind === "chat" && candidate.sessionId === sessionId,
-			);
-			const preferred: ChatTab = {
-				kind: "chat",
-				id: existing?.id ?? chatTabId(wsId, sessionId),
-				workspaceId: wsId,
-				name: entry.title,
-				sessionId,
-			};
-			const id = existing?.id ?? availableEditorTabId(tabs, preferred);
-			const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
-			return {
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "open",
-					workspaceId: wsId,
-					tab,
-					intent: "keep",
-					...layoutOpenIntentFields(options),
-				}),
-				tabsByWorkspace: existing
-					? existing.name === tab.name
-						? s.tabsByWorkspace
-						: {
-								...s.tabsByWorkspace,
-								[wsId]: tabs.map((candidate) => (candidate === existing ? tab : candidate)),
-							}
-					: { ...s.tabsByWorkspace, [wsId]: [...tabs, tab] },
-				activeTabByWorkspace:
-					options.activate === false
-						? s.activeTabByWorkspace
-						: { ...s.activeTabByWorkspace, [wsId]: id },
-				navTickByWorkspace:
-					options.activate === false || navigationCountedAtRequest(options)
-						? s.navTickByWorkspace
-						: bumpNav(s, wsId),
-				closedChatsByWorkspace: {
-					...s.closedChatsByWorkspace,
-					[wsId]: closed.filter((c) => c.sessionId !== sessionId),
-				},
-			};
-		}),
-	restorePlacedChatCache: (workspaceId, tabId, sessionId, title) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId] || isSessionDeleted(s, workspaceId, sessionId)) {
-				return {};
-			}
-			const tabs = s.tabsByWorkspace[workspaceId] ?? [];
-			const placed = tabs.find(
-				(tab): tab is ChatTab => tab.kind === "chat" && tab.sessionId === sessionId,
-			);
-			const idAvailable = (candidateId: string) =>
-				!tabs.some((candidate) => candidate !== placed && candidate.id === candidateId);
-			const canonicalId = chatTabId(workspaceId, sessionId);
-			const available = [tabId, placed?.id, canonicalId].find(
-				(candidateId): candidateId is string =>
-					candidateId !== undefined && idAvailable(candidateId),
-			);
-			let id = available ?? randomId("chat-cache");
-			while (!idAvailable(id)) id = randomId("chat-cache");
-			const closed = s.closedChatsByWorkspace[workspaceId] ?? [];
-			const inHistory = closed.some((chat) => chat.sessionId === sessionId);
-			const metadataChanged = placed?.name !== title || placed.id !== id;
-			if (placed && !inHistory && !metadataChanged) return {};
-			const tab: ChatTab = { kind: "chat", id, workspaceId, name: title, sessionId };
-			const retargeted = placed !== undefined && placed.id !== id;
-			return {
-				tabsByWorkspace: placed
-					? metadataChanged
-						? {
-								...s.tabsByWorkspace,
-								[workspaceId]: tabs.map((candidate) => (candidate === placed ? tab : candidate)),
-							}
-						: s.tabsByWorkspace
-					: { ...s.tabsByWorkspace, [workspaceId]: [...tabs, tab] },
-				closedChatsByWorkspace: inHistory
-					? {
-							...s.closedChatsByWorkspace,
-							[workspaceId]: closed.filter((chat) => chat.sessionId !== sessionId),
-						}
-					: s.closedChatsByWorkspace,
-				activeTabByWorkspace:
-					retargeted && s.activeTabByWorkspace[workspaceId] === placed?.id
-						? { ...s.activeTabByWorkspace, [workspaceId]: id }
-						: s.activeTabByWorkspace,
-				previewTabByWorkspace:
-					retargeted && s.previewTabByWorkspace[workspaceId] === placed?.id
-						? { ...s.previewTabByWorkspace, [workspaceId]: id }
-						: s.previewTabByWorkspace,
-			};
-		}),
-	hydrateSessionActivity: (rows) =>
-		set((s) => {
-			const next: Record<string, WorkspaceActivity> = Object.create(null);
-			for (const row of rows) {
-				if (s.removedWorkspaceIds[row.workspaceId]) continue;
-				if (isSessionDeleted(s, row.workspaceId, row.sessionId)) continue;
-				const forWorkspace =
-					next[row.workspaceId] ??
-					({ projectId: row.projectId, sessions: Object.create(null) } as WorkspaceActivity);
-				forWorkspace.sessions[row.sessionId] = row.status;
-				next[row.workspaceId] = forWorkspace;
-			}
-			return sameActivityMap(s.activityByWorkspace, next) ? {} : { activityByWorkspace: next };
-		}),
-	applySessionActivity: ({ workspaceId, projectId, sessionId, status }) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const current = s.activityByWorkspace[workspaceId];
-			if (status === null || isSessionDeleted(s, workspaceId, sessionId)) {
-				if (current?.sessions[sessionId] === undefined) return {};
-				return withoutSessionActivity(s, workspaceId, sessionId);
-			}
-			if (current?.sessions[sessionId] === status && current.projectId === projectId) return {};
-			return {
-				activityByWorkspace: {
-					...s.activityByWorkspace,
-					[workspaceId]: {
-						projectId,
-						sessions: { ...current?.sessions, [sessionId]: status },
-					},
-				},
-			};
-		}),
-	noteClosedChats: (workspaceId, entries) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const existing = s.closedChatsByWorkspace[workspaceId] ?? [];
-			const open = new Set(
-				(s.tabsByWorkspace[workspaceId] ?? [])
-					.filter((tab): tab is ChatTab => tab.kind === "chat")
-					.map((tab) => tab.sessionId),
-			);
-			const incoming = new Map(
-				entries
-					.filter(
-						(entry) =>
-							!isSessionDeleted(s, workspaceId, entry.sessionId) &&
-							!open.has(entry.sessionId) &&
-							!s.sessions[entry.sessionId],
-					)
-					.map((entry) => [entry.sessionId, entry]),
-			);
-			let changed = false;
-			const refreshed = existing.map((entry) => {
-				const replacement = incoming.get(entry.sessionId);
-				if (!replacement) return entry;
-				incoming.delete(entry.sessionId);
-				if (replacement.title === entry.title) return entry;
-				changed = true;
-				return { ...entry, title: replacement.title };
-			});
-			if (incoming.size > 0) changed = true;
-			if (!changed) return {};
-			return {
-				closedChatsByWorkspace: {
-					...s.closedChatsByWorkspace,
-					[workspaceId]: [...refreshed, ...incoming.values()].sort(
-						(a, b) => b.closedAt - a.closedAt,
-					),
-				},
-			};
-		}),
-	hydrateSession: (summary, hydrated, activate = false, syncedTick, options = {}) => {
-		set((s) => {
-			if (
-				s.removedWorkspaceIds[summary.workspaceId] ||
-				isSessionDeleted(s, summary.workspaceId, summary.sessionId)
-			) {
-				return {};
-			}
-			if (s.sessions[summary.sessionId]) return {};
-			const wsId = summary.workspaceId;
-			const runtime: SessionRuntime = {
-				...newRuntime(summary.model, summary.thinkingLevel, s.connectionGeneration),
-				turns: hydrated.turns,
-				toolResults: hydrated.toolResults,
-				askAnswers: hydrated.askAnswers,
-				isStreaming: summary.isStreaming,
-				...(summary.queue ? { queue: summary.queue } : {}),
-				...(hydrated.turnIdByMessageIndex
-					? { turnIdByMessageIndex: hydrated.turnIdByMessageIndex }
-					: {}),
-			};
-			const tabs = s.tabsByWorkspace[wsId] ?? [];
-			const existing = tabs.find(
-				(candidate): candidate is ChatTab =>
-					candidate.kind === "chat" && candidate.sessionId === summary.sessionId,
-			);
-			const preferred: ChatTab = {
-				kind: "chat",
-				id: existing?.id ?? chatTabId(wsId, summary.sessionId),
-				workspaceId: wsId,
-				name: summary.title,
-				sessionId: summary.sessionId,
-			};
-			const id = existing?.id ?? availableEditorTabId(tabs, preferred);
-			const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
-			const hasActive = s.activeTabByWorkspace[wsId] != null;
-			const takesFocus = options.activate !== false && (activate || !hasActive);
-			const closed = s.closedChatsByWorkspace[wsId] ?? [];
-			return {
-				...(activate
-					? {
-							layoutIntents: appendLayoutIntent(s.layoutIntents, {
-								kind: "open",
-								workspaceId: wsId,
-								tab,
-								intent: "keep",
-								...layoutOpenIntentFields(options),
-							}),
-						}
-					: {}),
-				sessions: { ...s.sessions, [summary.sessionId]: runtime },
-				...(syncedTick !== undefined
-					? {
-							skillsSyncedTickBySession: {
-								...s.skillsSyncedTickBySession,
-								[summary.sessionId]: syncedTick,
-							},
-						}
-					: {}),
-				tabsByWorkspace: existing
-					? existing.name === tab.name
-						? s.tabsByWorkspace
-						: {
-								...s.tabsByWorkspace,
-								[wsId]: tabs.map((candidate) => (candidate === existing ? tab : candidate)),
-							}
-					: { ...s.tabsByWorkspace, [wsId]: [...tabs, tab] },
-				activeTabByWorkspace: takesFocus
-					? { ...s.activeTabByWorkspace, [wsId]: id }
-					: s.activeTabByWorkspace,
-				navTickByWorkspace:
-					takesFocus && !navigationCountedAtRequest(options)
-						? bumpNav(s, wsId)
-						: s.navTickByWorkspace,
-				closedChatsByWorkspace: closed.some((c) => c.sessionId === summary.sessionId)
-					? {
-							...s.closedChatsByWorkspace,
-							[wsId]: closed.filter((c) => c.sessionId !== summary.sessionId),
-						}
-					: s.closedChatsByWorkspace,
-			};
-		});
-		replayExtUiOrphans(summary.sessionId, set, get);
-	},
-	reconcileSession: (summary, hydrated, expectedEventRevision, connectionGeneration) => {
-		let applied = false;
-		set((s) => {
-			const current = s.sessions[summary.sessionId];
-			if (
-				!current ||
-				current.eventRevision !== expectedEventRevision ||
-				s.removedWorkspaceIds[summary.workspaceId] ||
-				isSessionDeleted(s, summary.workspaceId, summary.sessionId) ||
-				!selectWorkspaceSessionIds(s, summary.workspaceId).includes(summary.sessionId)
-			) {
-				return {};
-			}
-			const { turnIdByMessageIndex: _previousMessageIndex, ...preserved } = current;
-			void _previousMessageIndex;
-			const runtime: SessionRuntime = {
-				...preserved,
-				turns: reconcileCompactionTurns(current.turns, hydrated.turns, summary.isStreaming),
-				toolResults: hydrated.toolResults,
-				askAnswers: hydrated.askAnswers,
-				currentAssistantId: null,
-				attemptAssistantId: null,
-				isStreaming: summary.isStreaming,
-				queue: summary.queue ?? EMPTY_QUEUE,
-				model: summary.model,
-				thinkingLevel: summary.thinkingLevel,
-				eventRevision: current.eventRevision + 1,
-				syncedConnectionGeneration: Math.max(
-					current.syncedConnectionGeneration,
-					connectionGeneration,
-				),
-				...(hydrated.turnIdByMessageIndex
-					? { turnIdByMessageIndex: hydrated.turnIdByMessageIndex }
-					: {}),
-			};
-			applied = true;
-			return { sessions: { ...s.sessions, [summary.sessionId]: runtime } };
-		});
-		return applied;
-	},
-	appendUserMessage: (sessionId, text, attachments) =>
-		set((s) =>
-			withRuntime(s, sessionId, (rt) => ({
-				...rt,
-				turns: [
-					...consumeFailureRecoveries(rt.turns),
-					{
-						kind: "user",
-						id: crypto.randomUUID(),
-						message: {
-							role: "user",
-							content:
-								attachments && attachments.length > 0
-									? [
-											...(text ? [{ type: "text" as const, text }] : []),
-											...attachments.map((a) => a.content),
-										]
-									: text,
-							timestamp: Date.now(),
-						},
-						...(attachments && attachments.length > 0
-							? { attachmentNames: attachments.map((a) => a.name) }
-							: {}),
-					},
-				],
-			})),
-		),
-	appendErrorTurn: (sessionId, text) =>
-		set((s) =>
-			withRuntime(s, sessionId, (rt) => ({
-				...rt,
-				turns: [...rt.turns, { kind: "error", id: crypto.randomUUID(), text }],
-			})),
-		),
-	appendCompactionFailureUnlessObserved: (sessionId, observedTurnIds, detail) =>
-		set((s) =>
-			withRuntime(s, sessionId, (rt) => {
-				const lifecycleObserved = rt.turns.some(
-					(turn) => turn.kind === "compaction" && !observedTurnIds.has(turn.id),
-				);
-				return lifecycleObserved
-					? rt
-					: {
-							...rt,
-							turns: [
-								...rt.turns,
-								{ kind: "compaction", id: crypto.randomUUID(), status: "failed", detail },
-							],
-						};
-			}),
-		),
-	handlePiEvent: (event, sessionId) => get().handlePiEvents([{ event, sessionId }]),
-	handlePiEvents: (payloads) =>
-		set((s) => {
-			let state = s;
-			let sessions = s.sessions;
-			for (const { event, sessionId } of payloads) {
-				if (event.type === "session_info_changed") {
-					const title = event.name?.trim() || "Chat";
-					const renamed = renameChat(state, sessionId, title);
-					if (renamed && Object.keys(renamed).length > 0) state = { ...state, ...renamed };
-				}
-				const runtime = sessions[sessionId];
-				if (!runtime) continue;
-				if (sessions === s.sessions) sessions = { ...sessions };
-				const next = reduceSessionEvent(runtime, event);
-				sessions[sessionId] = {
-					...next,
-					eventRevision: runtime.eventRevision + 1,
-					statsRefreshTick: runtime.statsRefreshTick + (invalidatesSessionStats(event) ? 1 : 0),
+						...(reveal ? {} : { reveal: false as const }),
+					}),
+					terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: [...list, tab] },
+					activeTerminalByWorkspace: { ...s.activeTerminalByWorkspace, [workspaceId]: tabKey },
 				};
-			}
-			if (sessions !== s.sessions) state = { ...state, sessions };
-			return state;
-		}),
-	setModelsForProviderVersion: (providerVersion, models) =>
-		set((s) => (s.providerVersion === providerVersion ? { models, modelsFresh: false } : s)),
-	noteProviderChanged: () =>
-		set((s) => ({
-			models: [],
-			modelsFresh: false,
-			modelsRefreshing: false,
-			providerVersion: s.providerVersion + 1,
-		})),
-	bumpTemplatesVersion: () => set((s) => ({ templatesVersion: s.templatesVersion + 1 })),
-	beginModelsRefresh: () => {
-		const providerVersion = get().providerVersion;
-		set({ modelsRefreshing: true });
-		return providerVersion;
-	},
-	dropModelsFreshness: () => set({ modelsFresh: false }),
-	finishModelsRefresh: (providerVersion, result) =>
-		set((s) =>
-			s.providerVersion === providerVersion
-				? {
-						modelsRefreshing: false,
-						models: result?.models ?? s.models,
-						modelsFresh: result ? result.complete : s.modelsFresh,
-					}
-				: s,
-		),
-	setCurrentModel: (sessionId, model) =>
-		set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, model }))),
-	setThinkingLevel: (sessionId, level) =>
-		set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, thinkingLevel: level }))),
-	setStats: (sessionId, stats) => set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, stats }))),
-	setCommands: (sessionId, commands) =>
-		set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, commands }))),
-	setChatDraft: (sessionId, draft) =>
-		set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, draft }))),
-	clearPendingExtUi: (sessionId, id) =>
-		set((s) =>
-			withRuntime(s, sessionId, (rt) => {
-				if (rt.pendingExtUi?.id !== id) return rt;
-				const [next, ...rest] = rt.extUiQueue;
-				return { ...rt, pendingExtUi: next ?? null, extUiQueue: rest };
 			}),
-		),
-	applyExtUi: (request) =>
-		set((s): Partial<AppState> => {
-			if (request.kind === "setTitle")
-				return renameChat(s, request.sessionId, request.title) ?? bufferExtUiOrphan(s, request);
-			if (!s.sessions[request.sessionId]) return bufferExtUiOrphan(s, request);
-			return withRuntime(s, request.sessionId, (rt) => reduceExtUi(rt, request));
-		}),
-	beginLogin: (loginId, providerId) =>
-		set((s) =>
-			s.activeLogin?.loginId === loginId ? {} : { activeLogin: newLoginState(loginId, providerId) },
-		),
-	applyLoginFrame: (push) =>
-		set((s) => {
-			const cur = s.activeLogin;
-			if (cur && cur.loginId !== push.loginId && cur.status === "active") return {};
-			const base =
-				cur && cur.loginId === push.loginId ? cur : newLoginState(push.loginId, push.providerId);
-			return { activeLogin: foldLoginFrame(base, push.frame) };
-		}),
-	clearLoginInput: () =>
-		set((s) => {
-			if (!s.activeLogin?.input) return {};
-			const { input: _drop, ...rest } = s.activeLogin;
-			return { activeLogin: rest };
-		}),
-	clearLogin: () => set({ activeLogin: null }),
-	openSettings: (section = SettingsSection.Providers) =>
-		set({ settingsOpen: true, settingsSection: section }),
-	closeSettings: () => set({ settingsOpen: false }),
-	setSettingsSection: (section) => set({ settingsSection: section }),
-	showInterviewPrompt: () =>
-		set((state) => (state.interviewPromptOpen ? state : { interviewPromptOpen: true })),
-	hideInterviewPrompt: () => set({ interviewPromptOpen: false }),
-	setChatMessageOrder: (chatMessageOrder) => set({ chatMessageOrder }),
-	setStreamingResponseMovement: (streamingResponseMovement) => set({ streamingResponseMovement }),
-	setChatPreferences: (chatMessageOrder, streamingResponseMovement) =>
-		set({ chatMessageOrder, streamingResponseMovement }),
-	applyConfig: (config) => set(configPatch(config)),
-	requestToolView: (workspaceId, tool) =>
-		set((state) =>
-			state.removedWorkspaceIds[workspaceId]
-				? {}
-				: {
-						layoutIntents: appendLayoutIntent(state.layoutIntents, {
-							kind: "reveal-tool",
+		setWorkspaceTerminals: (workspaceId, tabs) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const local = s.terminalsByWorkspace[workspaceId] ?? [];
+				const known = new Set(tabs.map((tab) => tab.tabKey));
+				const pending = local.filter((tab) => !known.has(tab.tabKey) && tab.reservationPending);
+				const merged: TerminalTab[] = [
+					...tabs.map((tab) => {
+						const existing = local.find((candidate) => candidate.tabKey === tab.tabKey);
+						return {
+							tabKey: tab.tabKey,
 							workspaceId,
-							tool,
-						}),
+							title: tab.title,
+							...(existing?.initialCommand ? { initialCommand: existing.initialCommand } : {}),
+						};
+					}),
+					...pending,
+				];
+				const active = s.activeTerminalByWorkspace[workspaceId] ?? null;
+				const activeSurvives = merged.some((tab) => tab.tabKey === active);
+				return {
+					terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: merged },
+					activeTerminalByWorkspace: {
+						...s.activeTerminalByWorkspace,
+						[workspaceId]: activeSurvives ? active : (merged.at(-1)?.tabKey ?? null),
 					},
-		),
-	requestChangesView: (workspaceId, path) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const advanced = advanceCenterNavigation(s, workspaceId);
-			return {
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "reveal-tool",
-					workspaceId,
-					tool: "changes",
-				}),
-				changesRequest: {
-					workspaceId,
-					path,
-					navTick: selectWorkspaceNavTick(s, workspaceId) + 1,
-					navigation: advanced.stamp,
+				};
+			}),
+		confirmTerminalReservation: (workspaceId, tabKey) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const list = s.terminalsByWorkspace[workspaceId] ?? [];
+				if (!list.some((tab) => tab.tabKey === tabKey && tab.reservationPending)) return s;
+				return {
+					terminalsByWorkspace: {
+						...s.terminalsByWorkspace,
+						[workspaceId]: list.map(({ reservationPending, ...rest }) =>
+							rest.tabKey === tabKey
+								? rest
+								: { ...rest, ...(reservationPending ? { reservationPending } : {}) },
+						),
+					},
+				};
+			}),
+		rejectTerminalReservation: (workspaceId, tabKey) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const list = s.terminalsByWorkspace[workspaceId] ?? [];
+				if (!list.some((tab) => tab.tabKey === tabKey && tab.reservationPending)) return s;
+				const terminals = list.filter((tab) => tab.tabKey !== tabKey);
+				const active = s.activeTerminalByWorkspace[workspaceId] ?? null;
+				return {
+					terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: terminals },
+					activeTerminalByWorkspace: {
+						...s.activeTerminalByWorkspace,
+						[workspaceId]: active === tabKey ? (terminals.at(-1)?.tabKey ?? null) : active,
+					},
+					layoutIntents: s.layoutIntents.filter(
+						(intent) =>
+							intent.kind !== "place-terminal" ||
+							intent.workspaceId !== workspaceId ||
+							intent.tabKey !== tabKey,
+					),
+				};
+			}),
+		consumeTerminalInitialCommand: (workspaceId, tabKey) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const list = s.terminalsByWorkspace[workspaceId] ?? [];
+				if (!list.some((t) => t.tabKey === tabKey && t.initialCommand)) return s;
+				return {
+					terminalsByWorkspace: {
+						...s.terminalsByWorkspace,
+						[workspaceId]: list.map(({ initialCommand, ...rest }) =>
+							rest.tabKey === tabKey
+								? rest
+								: { ...rest, ...(initialCommand ? { initialCommand } : {}) },
+						),
+					},
+				};
+			}),
+		closeTerminalTab: (workspaceId, tabKey, syncLayout = true) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const list = (s.terminalsByWorkspace[workspaceId] ?? []).filter((t) => t.tabKey !== tabKey);
+				const wasActive = s.activeTerminalByWorkspace[workspaceId] === tabKey;
+				return {
+					...(syncLayout
+						? {
+								layoutIntents: appendLayoutIntent(s.layoutIntents, {
+									kind: "close-terminal",
+									workspaceId,
+									tabKey,
+								}),
+							}
+						: {}),
+					terminalsByWorkspace: { ...s.terminalsByWorkspace, [workspaceId]: list },
+					activeTerminalByWorkspace: {
+						...s.activeTerminalByWorkspace,
+						[workspaceId]: wasActive
+							? (list.at(-1)?.tabKey ?? null)
+							: (s.activeTerminalByWorkspace[workspaceId] ?? null),
+					},
+				};
+			}),
+		setActiveTerminalTab: (workspaceId, tabKey, syncLayout = true) =>
+			set((s) =>
+				s.removedWorkspaceIds[workspaceId]
+					? {}
+					: {
+							...(syncLayout
+								? {
+										layoutIntents: appendLayoutIntent(s.layoutIntents, {
+											kind: "select-terminal",
+											workspaceId,
+											tabKey,
+										}),
+									}
+								: {}),
+							activeTerminalByWorkspace: { ...s.activeTerminalByWorkspace, [workspaceId]: tabKey },
+						},
+			),
+		beginWorktreeCreation: (projectId) =>
+			set((s) => ({
+				worktreeCreationsByProject: {
+					...s.worktreeCreationsByProject,
+					[projectId]: (s.worktreeCreationsByProject[projectId] ?? 0) + 1,
 				},
-				...advanced.patch,
-			};
-		}),
-	clearChangesRequest: () => set({ changesRequest: null }),
-	requestChatLocation: (req) =>
-		set((state) => {
-			if (
-				state.removedWorkspaceIds[req.workspaceId] ||
-				isSessionDeleted(state, req.workspaceId, req.sessionId)
-			) {
-				return {};
-			}
-			const hydrated = state.layoutAttentionByWorkspace[req.workspaceId] !== undefined;
-			const advanced = hydrated ? advanceCenterNavigation(state, req.workspaceId) : null;
-			return {
-				...(advanced?.patch ?? {}),
-				chatLocationRequest: {
-					...req,
-					...(advanced ? { navigation: advanced.stamp } : {}),
+			})),
+		endWorktreeCreation: (projectId) =>
+			set((s) => {
+				const remaining = (s.worktreeCreationsByProject[projectId] ?? 0) - 1;
+				return {
+					worktreeCreationsByProject:
+						remaining > 0
+							? { ...s.worktreeCreationsByProject, [projectId]: remaining }
+							: omitKey(s.worktreeCreationsByProject, projectId),
+				};
+			}),
+		beginChatStart: (workspaceId) =>
+			set((s) => ({
+				chatStartsByWorkspace: {
+					...s.chatStartsByWorkspace,
+					[workspaceId]: (s.chatStartsByWorkspace[workspaceId] ?? 0) + 1,
 				},
-				selectedProjectId: req.projectId,
-				activeWorkspaceId: req.workspaceId,
-				workspaceSelectionHistory: withWorkspaceSelected(
-					state.workspaceSelectionHistory,
-					req.workspaceId,
-				),
-			};
-		}),
-	clearChatLocation: () => set({ chatLocationRequest: null }),
-	requestHistoryOpen: (target) =>
-		set((s) => {
-			if (
-				s.removedWorkspaceIds[target.workspaceId] ||
-				isSessionDeleted(s, target.workspaceId, target.sessionId)
-			) {
-				return {};
-			}
-			const cache = s.tabsByWorkspace[target.workspaceId]?.find(
-				(candidate): candidate is ChatTab =>
-					candidate.kind === "chat" && candidate.sessionId === target.sessionId,
-			);
-			const resource: ChatTab =
-				cache ??
-				({
+			})),
+		endChatStart: (workspaceId) =>
+			set((s) => {
+				const remaining = (s.chatStartsByWorkspace[workspaceId] ?? 0) - 1;
+				return {
+					chatStartsByWorkspace:
+						remaining > 0
+							? { ...s.chatStartsByWorkspace, [workspaceId]: remaining }
+							: omitKey(s.chatStartsByWorkspace, workspaceId),
+				};
+			}),
+		openChatSession: (workspaceId, sessionId, model, thinkingLevel, syncedTick, options = {}) => {
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId] || isSessionDeleted(s, workspaceId, sessionId)) {
+					return {};
+				}
+				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
+				const existing = tabs.find(
+					(candidate): candidate is ChatTab =>
+						candidate.kind === "chat" && candidate.sessionId === sessionId,
+				);
+				const preferred: ChatTab = existing ?? {
 					kind: "chat",
-					id: target.tabId,
-					workspaceId: target.workspaceId,
-					name: "Chat",
-					sessionId: target.sessionId,
-				} satisfies ChatTab);
-			const resourcePlacement = selectLayoutResourcePlacement(s, target.workspaceId, resource);
-			const navigation = advanceCenterNavigation(
-				s,
-				target.workspaceId,
-				resourcePlacement?.area === "center" ? resourcePlacement.groupId : undefined,
-			);
-			const historyRequestId = randomId("history-open");
-			return {
-				...navigation.patch,
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "select",
-					workspaceId: target.workspaceId,
-					tabId: resourcePlacement?.tabId ?? target.tabId,
-					resource,
-					focus: false,
-					historyRequestId,
-					navigation: navigation.stamp,
-				}),
-				historyOpenRequest: { id: historyRequestId, sessionId: target.sessionId },
-				activeTabByWorkspace: cache
-					? { ...s.activeTabByWorkspace, [target.workspaceId]: cache.id }
-					: s.activeTabByWorkspace,
-			};
-		}),
-	clearHistoryOpen: () => set({ historyOpenRequest: null }),
-	requestSpecView: (workspaceId, path) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[workspaceId]) return {};
-			const advanced = advanceCenterNavigation(s, workspaceId);
-			return {
-				layoutIntents: appendLayoutIntent(s.layoutIntents, {
-					kind: "reveal-tool",
+					id: chatTabId(workspaceId, sessionId),
 					workspaceId,
-					tool: "specs",
+					name: "Chat",
+					sessionId,
+				};
+				const id = existing?.id ?? availableEditorTabId(tabs, preferred);
+				const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
+				const fresh = !s.sessions[sessionId];
+				const history = s.closedChatsByWorkspace[workspaceId] ?? [];
+				const inHistory = history.some((entry) => entry.sessionId === sessionId);
+				return {
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "open",
+						workspaceId,
+						tab,
+						intent: "keep",
+						...layoutOpenIntentFields(options),
+					}),
+					tabsByWorkspace: existing
+						? s.tabsByWorkspace
+						: { ...s.tabsByWorkspace, [workspaceId]: [...tabs, tab] },
+					closedChatsByWorkspace: inHistory
+						? {
+								...s.closedChatsByWorkspace,
+								[workspaceId]: history.filter((entry) => entry.sessionId !== sessionId),
+							}
+						: s.closedChatsByWorkspace,
+					activeTabByWorkspace:
+						options.activate === false
+							? s.activeTabByWorkspace
+							: { ...s.activeTabByWorkspace, [workspaceId]: id },
+					navTickByWorkspace:
+						options.activate === false || navigationCountedAtRequest(options)
+							? s.navTickByWorkspace
+							: bumpNav(s, workspaceId),
+					sessions: fresh
+						? {
+								...s.sessions,
+								[sessionId]: newRuntime(model, thinkingLevel, s.connectionGeneration),
+							}
+						: s.sessions,
+					...(fresh
+						? {
+								skillsSyncedTickBySession: {
+									...s.skillsSyncedTickBySession,
+									[sessionId]: syncedTick ?? selectWorkspaceTick(s, workspaceId),
+								},
+							}
+						: {}),
+				};
+			});
+			replayExtUiOrphans(sessionId, set, get);
+		},
+		closeChatRuntime: (sessionId) =>
+			set((s) => {
+				if (!s.sessions[sessionId]) return {};
+				return {
+					sessions: omitKey(s.sessions, sessionId),
+					skillsSyncedTickBySession: omitKey(s.skillsSyncedTickBySession, sessionId),
+				};
+			}),
+		closeChatToHistory: (sessionId, syncLayout = true, workspaceId, countNavigation = true) =>
+			set((s) => {
+				const wsId = workspaceId ?? s.activeWorkspaceId;
+				if (!wsId || s.removedWorkspaceIds[wsId]) return {};
+				const tabs = s.tabsByWorkspace[wsId] ?? [];
+				const tab = tabs.find((t) => t.kind === "chat" && t.sessionId === sessionId);
+				if (!tab) return {};
+				const remaining = tabs.filter((t) => t.id !== tab.id);
+				const wasActive = s.activeTabByWorkspace[wsId] === tab.id;
+				const entry: ClosedChat = { sessionId, title: tab.name, closedAt: Date.now() };
+				const targetsLocation =
+					s.chatLocationRequest?.workspaceId === wsId &&
+					s.chatLocationRequest.sessionId === sessionId;
+				const targetsHistory = s.historyOpenRequest?.sessionId === sessionId;
+				return {
+					...(syncLayout
+						? {
+								layoutIntents: appendLayoutIntent(s.layoutIntents, {
+									kind: "close",
+									workspaceId: wsId,
+									tabId: tab.id,
+								}),
+							}
+						: {}),
+					tabsByWorkspace: { ...s.tabsByWorkspace, [wsId]: remaining },
+					navTickByWorkspace:
+						wasActive && countNavigation ? bumpNav(s, wsId) : s.navTickByWorkspace,
+					activeTabByWorkspace: {
+						...s.activeTabByWorkspace,
+						[wsId]: wasActive
+							? (remaining.at(-1)?.id ?? null)
+							: (s.activeTabByWorkspace[wsId] ?? null),
+					},
+					closedChatsByWorkspace: {
+						...s.closedChatsByWorkspace,
+						[wsId]: [entry, ...(s.closedChatsByWorkspace[wsId] ?? [])],
+					},
+					...(targetsLocation ? { chatLocationRequest: null } : {}),
+					...(targetsHistory ? { historyOpenRequest: null } : {}),
+				};
+			}),
+		deleteChat: (workspaceId, sessionId, countNavigation = true) =>
+			set((s) => withoutChat(s, workspaceId, sessionId, countNavigation)),
+		reconcileWorkspaceSessions: (workspaceId, baselineSessionIds, authoritativeSessionIds) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const authoritative = new Set(authoritativeSessionIds);
+				let next = s;
+				for (const sessionId of baselineSessionIds) {
+					if (!authoritative.has(sessionId)) {
+						next = withoutChat(next, workspaceId, sessionId, false);
+					}
+				}
+				return next;
+			}),
+		reopenChat: (wsId, sessionId, options = {}) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[wsId] || isSessionDeleted(s, wsId, sessionId)) return {};
+				const closed = s.closedChatsByWorkspace[wsId] ?? [];
+				const entry = closed.find((c) => c.sessionId === sessionId);
+				if (!entry) return {};
+				const tabs = s.tabsByWorkspace[wsId] ?? [];
+				const existing = tabs.find(
+					(candidate): candidate is ChatTab =>
+						candidate.kind === "chat" && candidate.sessionId === sessionId,
+				);
+				const preferred: ChatTab = {
+					kind: "chat",
+					id: existing?.id ?? chatTabId(wsId, sessionId),
+					workspaceId: wsId,
+					name: entry.title,
+					sessionId,
+				};
+				const id = existing?.id ?? availableEditorTabId(tabs, preferred);
+				const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
+				return {
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "open",
+						workspaceId: wsId,
+						tab,
+						intent: "keep",
+						...layoutOpenIntentFields(options),
+					}),
+					tabsByWorkspace: existing
+						? existing.name === tab.name
+							? s.tabsByWorkspace
+							: {
+									...s.tabsByWorkspace,
+									[wsId]: tabs.map((candidate) => (candidate === existing ? tab : candidate)),
+								}
+						: { ...s.tabsByWorkspace, [wsId]: [...tabs, tab] },
+					activeTabByWorkspace:
+						options.activate === false
+							? s.activeTabByWorkspace
+							: { ...s.activeTabByWorkspace, [wsId]: id },
+					navTickByWorkspace:
+						options.activate === false || navigationCountedAtRequest(options)
+							? s.navTickByWorkspace
+							: bumpNav(s, wsId),
+					closedChatsByWorkspace: {
+						...s.closedChatsByWorkspace,
+						[wsId]: closed.filter((c) => c.sessionId !== sessionId),
+					},
+				};
+			}),
+		restorePlacedChatCache: (workspaceId, tabId, sessionId, title) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId] || isSessionDeleted(s, workspaceId, sessionId)) {
+					return {};
+				}
+				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
+				const placed = tabs.find(
+					(tab): tab is ChatTab => tab.kind === "chat" && tab.sessionId === sessionId,
+				);
+				const idAvailable = (candidateId: string) =>
+					!tabs.some((candidate) => candidate !== placed && candidate.id === candidateId);
+				const canonicalId = chatTabId(workspaceId, sessionId);
+				const available = [tabId, placed?.id, canonicalId].find(
+					(candidateId): candidateId is string =>
+						candidateId !== undefined && idAvailable(candidateId),
+				);
+				let id = available ?? randomId("chat-cache");
+				while (!idAvailable(id)) id = randomId("chat-cache");
+				const closed = s.closedChatsByWorkspace[workspaceId] ?? [];
+				const inHistory = closed.some((chat) => chat.sessionId === sessionId);
+				const metadataChanged = placed?.name !== title || placed.id !== id;
+				if (placed && !inHistory && !metadataChanged) return {};
+				const tab: ChatTab = { kind: "chat", id, workspaceId, name: title, sessionId };
+				const retargeted = placed !== undefined && placed.id !== id;
+				return {
+					tabsByWorkspace: placed
+						? metadataChanged
+							? {
+									...s.tabsByWorkspace,
+									[workspaceId]: tabs.map((candidate) => (candidate === placed ? tab : candidate)),
+								}
+							: s.tabsByWorkspace
+						: { ...s.tabsByWorkspace, [workspaceId]: [...tabs, tab] },
+					closedChatsByWorkspace: inHistory
+						? {
+								...s.closedChatsByWorkspace,
+								[workspaceId]: closed.filter((chat) => chat.sessionId !== sessionId),
+							}
+						: s.closedChatsByWorkspace,
+					activeTabByWorkspace:
+						retargeted && s.activeTabByWorkspace[workspaceId] === placed?.id
+							? { ...s.activeTabByWorkspace, [workspaceId]: id }
+							: s.activeTabByWorkspace,
+					previewTabByWorkspace:
+						retargeted && s.previewTabByWorkspace[workspaceId] === placed?.id
+							? { ...s.previewTabByWorkspace, [workspaceId]: id }
+							: s.previewTabByWorkspace,
+				};
+			}),
+		hydrateSessionActivity: (rows) =>
+			set((s) => {
+				const next: Record<string, WorkspaceActivity> = Object.create(null);
+				for (const row of rows) {
+					if (s.removedWorkspaceIds[row.workspaceId]) continue;
+					if (isSessionDeleted(s, row.workspaceId, row.sessionId)) continue;
+					const forWorkspace =
+						next[row.workspaceId] ??
+						({ projectId: row.projectId, sessions: Object.create(null) } as WorkspaceActivity);
+					forWorkspace.sessions[row.sessionId] = row.status;
+					next[row.workspaceId] = forWorkspace;
+				}
+				return sameActivityMap(s.activityByWorkspace, next) ? {} : { activityByWorkspace: next };
+			}),
+		applySessionActivity: ({ workspaceId, projectId, sessionId, status }) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const current = s.activityByWorkspace[workspaceId];
+				if (status === null || isSessionDeleted(s, workspaceId, sessionId)) {
+					if (current?.sessions[sessionId] === undefined) return {};
+					return withoutSessionActivity(s, workspaceId, sessionId);
+				}
+				if (current?.sessions[sessionId] === status && current.projectId === projectId) return {};
+				return {
+					activityByWorkspace: {
+						...s.activityByWorkspace,
+						[workspaceId]: {
+							projectId,
+							sessions: { ...current?.sessions, [sessionId]: status },
+						},
+					},
+				};
+			}),
+		noteClosedChats: (workspaceId, entries) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const existing = s.closedChatsByWorkspace[workspaceId] ?? [];
+				const open = new Set(
+					(s.tabsByWorkspace[workspaceId] ?? [])
+						.filter((tab): tab is ChatTab => tab.kind === "chat")
+						.map((tab) => tab.sessionId),
+				);
+				const incoming = new Map(
+					entries
+						.filter(
+							(entry) =>
+								!isSessionDeleted(s, workspaceId, entry.sessionId) &&
+								!open.has(entry.sessionId) &&
+								!s.sessions[entry.sessionId],
+						)
+						.map((entry) => [entry.sessionId, entry]),
+				);
+				let changed = false;
+				const refreshed = existing.map((entry) => {
+					const replacement = incoming.get(entry.sessionId);
+					if (!replacement) return entry;
+					incoming.delete(entry.sessionId);
+					if (replacement.title === entry.title) return entry;
+					changed = true;
+					return { ...entry, title: replacement.title };
+				});
+				if (incoming.size > 0) changed = true;
+				if (!changed) return {};
+				return {
+					closedChatsByWorkspace: {
+						...s.closedChatsByWorkspace,
+						[workspaceId]: [...refreshed, ...incoming.values()].sort(
+							(a, b) => b.closedAt - a.closedAt,
+						),
+					},
+				};
+			}),
+		hydrateSession: (summary, hydrated, activate = false, syncedTick, options = {}) => {
+			set((s) => {
+				if (
+					s.removedWorkspaceIds[summary.workspaceId] ||
+					isSessionDeleted(s, summary.workspaceId, summary.sessionId)
+				) {
+					return {};
+				}
+				if (s.sessions[summary.sessionId]) return {};
+				const wsId = summary.workspaceId;
+				const runtime: SessionRuntime = {
+					...newRuntime(summary.model, summary.thinkingLevel, s.connectionGeneration),
+					turns: hydrated.turns,
+					toolResults: hydrated.toolResults,
+					askAnswers: hydrated.askAnswers,
+					isStreaming: summary.isStreaming,
+					...(summary.queue ? { queue: summary.queue } : {}),
+					...(hydrated.turnIdByMessageIndex
+						? { turnIdByMessageIndex: hydrated.turnIdByMessageIndex }
+						: {}),
+				};
+				const tabs = s.tabsByWorkspace[wsId] ?? [];
+				const existing = tabs.find(
+					(candidate): candidate is ChatTab =>
+						candidate.kind === "chat" && candidate.sessionId === summary.sessionId,
+				);
+				const preferred: ChatTab = {
+					kind: "chat",
+					id: existing?.id ?? chatTabId(wsId, summary.sessionId),
+					workspaceId: wsId,
+					name: summary.title,
+					sessionId: summary.sessionId,
+				};
+				const id = existing?.id ?? availableEditorTabId(tabs, preferred);
+				const tab: ChatTab = id === preferred.id ? preferred : { ...preferred, id };
+				const hasActive = s.activeTabByWorkspace[wsId] != null;
+				const takesFocus = options.activate !== false && (activate || !hasActive);
+				const closed = s.closedChatsByWorkspace[wsId] ?? [];
+				return {
+					...(activate
+						? {
+								layoutIntents: appendLayoutIntent(s.layoutIntents, {
+									kind: "open",
+									workspaceId: wsId,
+									tab,
+									intent: "keep",
+									...layoutOpenIntentFields(options),
+								}),
+							}
+						: {}),
+					sessions: { ...s.sessions, [summary.sessionId]: runtime },
+					...(syncedTick !== undefined
+						? {
+								skillsSyncedTickBySession: {
+									...s.skillsSyncedTickBySession,
+									[summary.sessionId]: syncedTick,
+								},
+							}
+						: {}),
+					tabsByWorkspace: existing
+						? existing.name === tab.name
+							? s.tabsByWorkspace
+							: {
+									...s.tabsByWorkspace,
+									[wsId]: tabs.map((candidate) => (candidate === existing ? tab : candidate)),
+								}
+						: { ...s.tabsByWorkspace, [wsId]: [...tabs, tab] },
+					activeTabByWorkspace: takesFocus
+						? { ...s.activeTabByWorkspace, [wsId]: id }
+						: s.activeTabByWorkspace,
+					navTickByWorkspace:
+						takesFocus && !navigationCountedAtRequest(options)
+							? bumpNav(s, wsId)
+							: s.navTickByWorkspace,
+					closedChatsByWorkspace: closed.some((c) => c.sessionId === summary.sessionId)
+						? {
+								...s.closedChatsByWorkspace,
+								[wsId]: closed.filter((c) => c.sessionId !== summary.sessionId),
+							}
+						: s.closedChatsByWorkspace,
+				};
+			});
+			replayExtUiOrphans(summary.sessionId, set, get);
+		},
+		reconcileSession: (summary, hydrated, expectedEventRevision, connectionGeneration) => {
+			let applied = false;
+			set((s) => {
+				const current = s.sessions[summary.sessionId];
+				if (
+					!current ||
+					current.eventRevision !== expectedEventRevision ||
+					s.removedWorkspaceIds[summary.workspaceId] ||
+					isSessionDeleted(s, summary.workspaceId, summary.sessionId) ||
+					!selectWorkspaceSessionIds(s, summary.workspaceId).includes(summary.sessionId)
+				) {
+					return {};
+				}
+				const { turnIdByMessageIndex: _previousMessageIndex, ...preserved } = current;
+				void _previousMessageIndex;
+				const runtime: SessionRuntime = {
+					...preserved,
+					turns: reconcileCompactionTurns(current.turns, hydrated.turns, summary.isStreaming),
+					toolResults: hydrated.toolResults,
+					askAnswers: hydrated.askAnswers,
+					currentAssistantId: null,
+					attemptAssistantId: null,
+					isStreaming: summary.isStreaming,
+					queue: summary.queue ?? EMPTY_QUEUE,
+					model: summary.model,
+					thinkingLevel: summary.thinkingLevel,
+					eventRevision: current.eventRevision + 1,
+					syncedConnectionGeneration: Math.max(
+						current.syncedConnectionGeneration,
+						connectionGeneration,
+					),
+					...(hydrated.turnIdByMessageIndex
+						? { turnIdByMessageIndex: hydrated.turnIdByMessageIndex }
+						: {}),
+				};
+				applied = true;
+				return { sessions: { ...s.sessions, [summary.sessionId]: runtime } };
+			});
+			return applied;
+		},
+		appendUserMessage: (sessionId, text, attachments) =>
+			set((s) =>
+				withRuntime(s, sessionId, (rt) => ({
+					...rt,
+					turns: [
+						...consumeFailureRecoveries(rt.turns),
+						{
+							kind: "user",
+							id: crypto.randomUUID(),
+							message: {
+								role: "user",
+								content:
+									attachments && attachments.length > 0
+										? [
+												...(text ? [{ type: "text" as const, text }] : []),
+												...attachments.map((a) => a.content),
+											]
+										: text,
+								timestamp: Date.now(),
+							},
+							...(attachments && attachments.length > 0
+								? { attachmentNames: attachments.map((a) => a.name) }
+								: {}),
+						},
+					],
+				})),
+			),
+		appendErrorTurn: (sessionId, text) =>
+			set((s) =>
+				withRuntime(s, sessionId, (rt) => ({
+					...rt,
+					turns: [...rt.turns, { kind: "error", id: crypto.randomUUID(), text }],
+				})),
+			),
+		appendCompactionFailureUnlessObserved: (sessionId, observedTurnIds, detail) =>
+			set((s) =>
+				withRuntime(s, sessionId, (rt) => {
+					const lifecycleObserved = rt.turns.some(
+						(turn) => turn.kind === "compaction" && !observedTurnIds.has(turn.id),
+					);
+					return lifecycleObserved
+						? rt
+						: {
+								...rt,
+								turns: [
+									...rt.turns,
+									{ kind: "compaction", id: crypto.randomUUID(), status: "failed", detail },
+								],
+							};
 				}),
-				specRequest: { workspaceId, path, navigation: advanced.stamp },
-				...advanced.patch,
-			};
-		}),
-	clearSpecRequest: () => set({ specRequest: null }),
-	setWorkspaceSpecs: (workspaceId, nodes) =>
-		set((s) =>
-			s.removedWorkspaceIds[workspaceId] || sameSpecGraph(s.specsByWorkspace[workspaceId], nodes)
-				? {}
-				: { specsByWorkspace: { ...s.specsByWorkspace, [workspaceId]: nodes } },
-		),
-	requestReviewFocus: (workspaceId, commentId) =>
-		set((state) =>
-			state.removedWorkspaceIds[workspaceId]
-				? {}
-				: { reviewFocusRequest: { workspaceId, commentId } },
-		),
-	clearReviewFocus: (commentId) =>
-		set((state) =>
-			commentId !== undefined && state.reviewFocusRequest?.commentId !== commentId
-				? {}
-				: { reviewFocusRequest: null },
-		),
-	setWorkspaceReview: (workspaceId, snapshot) =>
-		set((s) =>
-			s.removedWorkspaceIds[workspaceId] ||
-			sameReviewSnapshot(s.reviewsByWorkspace[workspaceId], snapshot)
-				? {}
-				: { reviewsByWorkspace: { ...s.reviewsByWorkspace, [workspaceId]: snapshot } },
-		),
-	applyReviewChanged: (payload) =>
-		set((s) => {
-			if (s.removedWorkspaceIds[payload.workspaceId]) return {};
-			const next = { review: payload.review, comments: payload.comments };
-			return sameReviewSnapshot(s.reviewsByWorkspace[payload.workspaceId], next)
-				? {}
-				: { reviewsByWorkspace: { ...s.reviewsByWorkspace, [payload.workspaceId]: next } };
-		}),
-	pushToast: (toast) => {
-		const twin = get().toasts.find(
-			(t) => t.variant === toast.variant && t.title === toast.title && t.message === toast.message,
-		);
-		if (twin) return twin.id;
-		const id = crypto.randomUUID();
-		set((s) => ({ toasts: [...s.toasts, { ...toast, id }].slice(-MAX_TOASTS) }));
-		return id;
-	},
-	dismissToast: (id) =>
-		set((s) =>
-			s.toasts.some((t) => t.id === id) ? { toasts: s.toasts.filter((t) => t.id !== id) } : {},
-		),
-}));
+			),
+		handlePiEvent: (event, sessionId) => get().handlePiEvents([{ event, sessionId }]),
+		handlePiEvents: (payloads) =>
+			set((s) => {
+				let state = s;
+				let sessions = s.sessions;
+				for (const { event, sessionId } of payloads) {
+					if (event.type === "session_info_changed") {
+						const title = event.name?.trim() || "Chat";
+						const renamed = renameChat(state, sessionId, title);
+						if (renamed && Object.keys(renamed).length > 0) state = { ...state, ...renamed };
+					}
+					const runtime = sessions[sessionId];
+					if (!runtime) continue;
+					if (sessions === s.sessions) sessions = { ...sessions };
+					const next = reduceSessionEvent(runtime, event);
+					sessions[sessionId] = {
+						...next,
+						eventRevision: runtime.eventRevision + 1,
+						statsRefreshTick: runtime.statsRefreshTick + (invalidatesSessionStats(event) ? 1 : 0),
+					};
+				}
+				if (sessions !== s.sessions) state = { ...state, sessions };
+				return state;
+			}),
+		setModelsForProviderVersion: (providerVersion, models) =>
+			set((s) => (s.providerVersion === providerVersion ? { models, modelsFresh: false } : s)),
+		noteProviderChanged: () =>
+			set((s) => ({
+				models: [],
+				modelsFresh: false,
+				modelsRefreshing: false,
+				providerVersion: s.providerVersion + 1,
+			})),
+		bumpTemplatesVersion: () => set((s) => ({ templatesVersion: s.templatesVersion + 1 })),
+		beginModelsRefresh: () => {
+			const providerVersion = get().providerVersion;
+			set({ modelsRefreshing: true });
+			return providerVersion;
+		},
+		dropModelsFreshness: () => set({ modelsFresh: false }),
+		finishModelsRefresh: (providerVersion, result) =>
+			set((s) =>
+				s.providerVersion === providerVersion
+					? {
+							modelsRefreshing: false,
+							models: result?.models ?? s.models,
+							modelsFresh: result ? result.complete : s.modelsFresh,
+						}
+					: s,
+			),
+		setCurrentModel: (sessionId, model) =>
+			set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, model }))),
+		setThinkingLevel: (sessionId, level) =>
+			set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, thinkingLevel: level }))),
+		setStats: (sessionId, stats) =>
+			set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, stats }))),
+		setCommands: (sessionId, commands) =>
+			set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, commands }))),
+		setChatDraft: (sessionId, draft) =>
+			set((s) => withRuntime(s, sessionId, (rt) => ({ ...rt, draft }))),
+		clearPendingExtUi: (sessionId, id) =>
+			set((s) =>
+				withRuntime(s, sessionId, (rt) => {
+					if (rt.pendingExtUi?.id !== id) return rt;
+					const [next, ...rest] = rt.extUiQueue;
+					return { ...rt, pendingExtUi: next ?? null, extUiQueue: rest };
+				}),
+			),
+		applyExtUi: (request) =>
+			set((s): Partial<AppState> => {
+				if (request.kind === "setTitle")
+					return renameChat(s, request.sessionId, request.title) ?? bufferExtUiOrphan(s, request);
+				if (!s.sessions[request.sessionId]) return bufferExtUiOrphan(s, request);
+				return withRuntime(s, request.sessionId, (rt) => reduceExtUi(rt, request));
+			}),
+		beginLogin: (loginId, providerId) =>
+			set((s) =>
+				s.activeLogin?.loginId === loginId
+					? {}
+					: { activeLogin: newLoginState(loginId, providerId) },
+			),
+		applyLoginFrame: (push) =>
+			set((s) => {
+				const cur = s.activeLogin;
+				if (cur && cur.loginId !== push.loginId && cur.status === "active") return {};
+				const base =
+					cur && cur.loginId === push.loginId ? cur : newLoginState(push.loginId, push.providerId);
+				return { activeLogin: foldLoginFrame(base, push.frame) };
+			}),
+		clearLoginInput: () =>
+			set((s) => {
+				if (!s.activeLogin?.input) return {};
+				const { input: _drop, ...rest } = s.activeLogin;
+				return { activeLogin: rest };
+			}),
+		clearLogin: () => set({ activeLogin: null }),
+		openSettings: (section = SettingsSection.Providers) =>
+			set({ settingsOpen: true, settingsSection: section }),
+		closeSettings: () => set({ settingsOpen: false }),
+		setSettingsSection: (section) => set({ settingsSection: section }),
+		showInterviewPrompt: () =>
+			set((state) => (state.interviewPromptOpen ? state : { interviewPromptOpen: true })),
+		hideInterviewPrompt: () => set({ interviewPromptOpen: false }),
+		setChatMessageOrder: (chatMessageOrder) => set({ chatMessageOrder }),
+		setStreamingResponseMovement: (streamingResponseMovement) => set({ streamingResponseMovement }),
+		setChatPreferences: (chatMessageOrder, streamingResponseMovement) =>
+			set({ chatMessageOrder, streamingResponseMovement }),
+		applyConfig: (config) => set(configPatch(config)),
+		requestToolView: (workspaceId, tool) =>
+			set((state) =>
+				state.removedWorkspaceIds[workspaceId]
+					? {}
+					: {
+							layoutIntents: appendLayoutIntent(state.layoutIntents, {
+								kind: "reveal-tool",
+								workspaceId,
+								tool,
+							}),
+						},
+			),
+		requestChangesView: (workspaceId, path) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const advanced = advanceCenterNavigation(s, workspaceId);
+				return {
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "reveal-tool",
+						workspaceId,
+						tool: "changes",
+					}),
+					changesRequest: {
+						workspaceId,
+						path,
+						navTick: selectWorkspaceNavTick(s, workspaceId) + 1,
+						navigation: advanced.stamp,
+					},
+					...advanced.patch,
+				};
+			}),
+		clearChangesRequest: () => set({ changesRequest: null }),
+		requestChatLocation: (req) =>
+			set((state) => {
+				if (
+					state.removedWorkspaceIds[req.workspaceId] ||
+					isSessionDeleted(state, req.workspaceId, req.sessionId)
+				) {
+					return {};
+				}
+				const hydrated = state.layoutAttentionByWorkspace[req.workspaceId] !== undefined;
+				const advanced = hydrated ? advanceCenterNavigation(state, req.workspaceId) : null;
+				return {
+					...(advanced?.patch ?? {}),
+					chatLocationRequest: {
+						...req,
+						...(advanced ? { navigation: advanced.stamp } : {}),
+					},
+					selectedProjectId: req.projectId,
+					activeWorkspaceId: req.workspaceId,
+					workspaceSelectionHistory: withWorkspaceSelected(
+						state.workspaceSelectionHistory,
+						req.workspaceId,
+					),
+				};
+			}),
+		clearChatLocation: () => set({ chatLocationRequest: null }),
+		requestHistoryOpen: (target) =>
+			set((s) => {
+				if (
+					s.removedWorkspaceIds[target.workspaceId] ||
+					isSessionDeleted(s, target.workspaceId, target.sessionId)
+				) {
+					return {};
+				}
+				const cache = s.tabsByWorkspace[target.workspaceId]?.find(
+					(candidate): candidate is ChatTab =>
+						candidate.kind === "chat" && candidate.sessionId === target.sessionId,
+				);
+				const resource: ChatTab =
+					cache ??
+					({
+						kind: "chat",
+						id: target.tabId,
+						workspaceId: target.workspaceId,
+						name: "Chat",
+						sessionId: target.sessionId,
+					} satisfies ChatTab);
+				const resourcePlacement = selectLayoutResourcePlacement(s, target.workspaceId, resource);
+				const navigation = advanceCenterNavigation(
+					s,
+					target.workspaceId,
+					resourcePlacement?.area === "center" ? resourcePlacement.groupId : undefined,
+				);
+				const historyRequestId = randomId("history-open");
+				return {
+					...navigation.patch,
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "select",
+						workspaceId: target.workspaceId,
+						tabId: resourcePlacement?.tabId ?? target.tabId,
+						resource,
+						focus: false,
+						historyRequestId,
+						navigation: navigation.stamp,
+					}),
+					historyOpenRequest: { id: historyRequestId, sessionId: target.sessionId },
+					activeTabByWorkspace: cache
+						? { ...s.activeTabByWorkspace, [target.workspaceId]: cache.id }
+						: s.activeTabByWorkspace,
+				};
+			}),
+		clearHistoryOpen: () => set({ historyOpenRequest: null }),
+		requestSpecView: (workspaceId, path) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[workspaceId]) return {};
+				const advanced = advanceCenterNavigation(s, workspaceId);
+				return {
+					layoutIntents: appendLayoutIntent(s.layoutIntents, {
+						kind: "reveal-tool",
+						workspaceId,
+						tool: "specs",
+					}),
+					specRequest: { workspaceId, path, navigation: advanced.stamp },
+					...advanced.patch,
+				};
+			}),
+		clearSpecRequest: () => set({ specRequest: null }),
+		setWorkspaceSpecs: (workspaceId, nodes) =>
+			set((s) =>
+				s.removedWorkspaceIds[workspaceId] || sameSpecGraph(s.specsByWorkspace[workspaceId], nodes)
+					? {}
+					: { specsByWorkspace: { ...s.specsByWorkspace, [workspaceId]: nodes } },
+			),
+		requestReviewFocus: (workspaceId, commentId) =>
+			set((state) =>
+				state.removedWorkspaceIds[workspaceId]
+					? {}
+					: { reviewFocusRequest: { workspaceId, commentId } },
+			),
+		clearReviewFocus: (commentId) =>
+			set((state) =>
+				commentId !== undefined && state.reviewFocusRequest?.commentId !== commentId
+					? {}
+					: { reviewFocusRequest: null },
+			),
+		setWorkspaceReview: (workspaceId, snapshot) =>
+			set((s) =>
+				s.removedWorkspaceIds[workspaceId] ||
+				sameReviewSnapshot(s.reviewsByWorkspace[workspaceId], snapshot)
+					? {}
+					: { reviewsByWorkspace: { ...s.reviewsByWorkspace, [workspaceId]: snapshot } },
+			),
+		applyReviewChanged: (payload) =>
+			set((s) => {
+				if (s.removedWorkspaceIds[payload.workspaceId]) return {};
+				const next = { review: payload.review, comments: payload.comments };
+				return sameReviewSnapshot(s.reviewsByWorkspace[payload.workspaceId], next)
+					? {}
+					: { reviewsByWorkspace: { ...s.reviewsByWorkspace, [payload.workspaceId]: next } };
+			}),
+		pushToast: (toast) => {
+			const twin = get().toasts.find(
+				(t) =>
+					t.variant === toast.variant && t.title === toast.title && t.message === toast.message,
+			);
+			if (twin) return twin.id;
+			const id = crypto.randomUUID();
+			set((s) => ({ toasts: [...s.toasts, { ...toast, id }].slice(-MAX_TOASTS) }));
+			return id;
+		},
+		dismissToast: (id) =>
+			set((s) =>
+				s.toasts.some((t) => t.id === id) ? { toasts: s.toasts.filter((t) => t.id !== id) } : {},
+			),
+	};
+});
 
 export const toast = {
 	error: (message: string, title?: string) =>

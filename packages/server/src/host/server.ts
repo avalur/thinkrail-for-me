@@ -51,6 +51,15 @@ import {
 } from "../auth";
 import { redeliverInterview, releaseInterview, setFeedbackPublisher } from "../feedback";
 import { resolveWorktreeFile } from "../fs";
+import {
+	closeHubDb,
+	handleProxyRequest,
+	setHubAccountStatusPublisher,
+	setHubMessagePublisher,
+	setHubSyncStatusPublisher,
+	startSyncCoordinator,
+	stopSyncCoordinator,
+} from "../hub";
 import { logger } from "../log";
 import { loadWorkspaces } from "../persistence";
 import {
@@ -212,6 +221,9 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 			if (url.pathname === "/health") {
 				return new Response("ok");
 			}
+			if (url.pathname.startsWith("/proxy")) {
+				return handleProxyRequest(req);
+			}
 			if (url.pathname.startsWith("/files/")) {
 				return serveWorktreeFile(url.pathname);
 			}
@@ -245,6 +257,9 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 				ws.subscribe(WS_CHANNELS.workspaceRemoved);
 				ws.subscribe(WS_CHANNELS.workspaceFsChanged);
 				ws.subscribe(WS_CHANNELS.settingsChanged);
+				ws.subscribe(WS_CHANNELS.hubMessageReceived);
+				ws.subscribe(WS_CHANNELS.hubAccountStatusChanged);
+				ws.subscribe(WS_CHANNELS.hubSyncStatus);
 				if (hostUpdate) ws.subscribe(WS_CHANNELS.hostUpdateAvailable);
 				ws.subscribe(WS_CHANNELS.reviewChanged);
 				const hostPlatform: HostPlatform =
@@ -614,6 +629,25 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 		);
 	});
 
+	setHubMessagePublisher((payload) => {
+		server.publish(
+			WS_CHANNELS.hubMessageReceived,
+			JSON.stringify({ channel: WS_CHANNELS.hubMessageReceived, data: payload }),
+		);
+	});
+	setHubAccountStatusPublisher((payload) => {
+		server.publish(
+			WS_CHANNELS.hubAccountStatusChanged,
+			JSON.stringify({ channel: WS_CHANNELS.hubAccountStatusChanged, data: payload }),
+		);
+	});
+	setHubSyncStatusPublisher((payload) => {
+		server.publish(
+			WS_CHANNELS.hubSyncStatus,
+			JSON.stringify({ channel: WS_CHANNELS.hubSyncStatus, data: payload }),
+		);
+	});
+
 	initializeAnalytics({
 		...(appVersion ? { appVersion } : {}),
 		...(analytics ?? {}),
@@ -632,6 +666,7 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 	}
 
 	void observeCurrentSetup();
+	void startSyncCoordinator();
 
 	const stop = (): void => {
 		if (stopping) return;
@@ -656,6 +691,11 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 		setSettingsPublisher(null);
 		setJbcentralAppliedPublisher(() => {});
 		setJbcentralChangedPublisher(() => {});
+		setHubMessagePublisher(null);
+		setHubAccountStatusPublisher(null);
+		setHubSyncStatusPublisher(null);
+		stopSyncCoordinator();
+		closeHubDb();
 		server.stop(true);
 	};
 	const shutdown = (): Promise<void> => {

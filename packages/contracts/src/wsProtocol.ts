@@ -45,6 +45,18 @@ import type {
 } from "./domain";
 import { isDelegationRunDetails } from "./domain";
 import type {
+	HubAccount,
+	HubAccountProvider,
+	HubDashboardSummary,
+	HubFilter,
+	HubMarkReadParams,
+	HubMessage,
+	HubSendMessageParams,
+	HubSendMessageResult,
+	HubSyncNowParams,
+	HubSyncNowResult,
+} from "./hubDomain";
+import type {
 	AskUserAnswersDetails,
 	AskUserQuestionResult,
 	ExtUiResponse,
@@ -96,7 +108,8 @@ export type TemplateReadLocation =
 	| { projectId: string; workspaceId?: never }
 	| { workspaceId?: never; projectId?: never };
 
-export const PROTOCOL_VERSION = 66;
+export const PROTOCOL_VERSION = 67;
+export const HUB_PROTOCOL_VERSION = 67;
 export const ANALYTICS_CONSENT_PROTOCOL_VERSION = 65;
 export const SESSION_RENAME_PROTOCOL_VERSION = 66;
 export const SESSION_TITLE_MAX_LENGTH = 80;
@@ -262,6 +275,12 @@ export const WS_METHODS = {
 	templateGet: "template.get",
 	templateSave: "template.save",
 	templateDelete: "template.delete",
+	hubGetAccounts: "hub.getAccounts",
+	hubGetMessages: "hub.getMessages",
+	hubGetDashboardSummary: "hub.getDashboardSummary",
+	hubMarkRead: "hub.markRead",
+	hubSendMessage: "hub.sendMessage",
+	hubSyncNow: "hub.syncNow",
 } as const;
 
 export const WS_CHANNELS = {
@@ -286,6 +305,9 @@ export const WS_CHANNELS = {
 	hostUpdateAvailable: "host.updateAvailable",
 	feedbackInterview: "feedback.interview",
 	reviewChanged: "review.changed",
+	hubMessageReceived: "hub.messageReceived",
+	hubAccountStatusChanged: "hub.accountStatusChanged",
+	hubSyncStatus: "hub.syncStatus",
 } as const;
 
 export type WsMethod = (typeof WS_METHODS)[keyof typeof WS_METHODS];
@@ -633,6 +655,30 @@ export interface WsMethodMap {
 	"template.delete": {
 		params: { workspaceId?: string; scope: TemplateScope; name: string };
 		result: Ack;
+	};
+	"hub.getAccounts": {
+		params: { provider?: HubAccountProvider } | Record<string, never>;
+		result: { accounts: HubAccount[] };
+	};
+	"hub.getMessages": {
+		params: HubFilter;
+		result: { messages: HubMessage[]; total: number; hasMore: boolean };
+	};
+	"hub.getDashboardSummary": {
+		params: Record<string, never>;
+		result: HubDashboardSummary;
+	};
+	"hub.markRead": {
+		params: HubMarkReadParams;
+		result: Ack & { modifiedCount?: number };
+	};
+	"hub.sendMessage": {
+		params: HubSendMessageParams;
+		result: HubSendMessageResult;
+	};
+	"hub.syncNow": {
+		params: HubSyncNowParams;
+		result: HubSyncNowResult;
 	};
 }
 

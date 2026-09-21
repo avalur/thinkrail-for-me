@@ -27,8 +27,9 @@ of the host.
   instead of pattern-matching an error message. A failure earns a code only when a client behaves differently
   for it; everything else stays a plain `error` string. Expected method-specific outcomes remain typed method
   results rather than generic WS failures; no current-layout protocol exists.
-- **Public surface (`index.ts`):** `export type *` of `piProtocol` + `domain` + `nativeClient`
-  (`NativeUpdateState` and `NativeUpdateBridge`, the optional shell-local desktop update capability); the
+- **Public surface (`index.ts`):** `export type *` of `piProtocol` + `domain` + `nativeClient` + `hubDomain`
+  (`NativeUpdateState` and `NativeUpdateBridge`, the optional shell-local desktop update capability; `HubAccount`,
+  `HubMessage`, `HubChannel`, `HubAgentTask`, `HubFilter`, `HubDashboardSummary`); the
   value re-exports
   `DEFAULT_CONFIG`, `THEME_MODES`, `isThemeMode`, `isSystemThemePair`, `normalizeThemePreference`,
   `JBCENTRAL_QUOTA_REFRESH_SECONDS`, `isJbcentralQuotaRefreshSeconds`, `isJbcentralConnected`,
@@ -40,7 +41,11 @@ of the host.
   sides agree here rather than each re-deriving `startsWith`) + **`isRetriedAttempt(messages, index)`**
   (the one shared reading of pi's persisted-but-superseded auto-retry attempts — the client's hydration
   hides their turns, the host's history indexer skips their text; both consume the index slot so jump
-  anchors stay aligned) from `domain`; **`isTranscriptMessageRole(role)`**
+  anchors stay aligned) from `domain`;
+  `HUB_ACCOUNT_PROVIDERS`, `HUB_ACCOUNT_STATUSES`, `HUB_AGENT_TASK_STATUSES`, `HUB_CHANNEL_KINDS`,
+  `isHubAccount`, `isHubAccountProvider`, `isHubAccountStatus`, `isHubAgentTask`, `isHubAgentTaskStatus`,
+  `isHubChannel`, `isHubChannelKind`, `isHubDashboardSummary`, `isHubMessage` from `hubDomain`;
+  **`isTranscriptMessageRole(role)`**
   from `piProtocol` (the one definition of which roles a transcript carries: the host filters
   `session.getMessages` by it *and* `history` counts `messageIndex` by it, so two copies differing by a role
   would silently shift every later jump anchor); `export *` (value) of `wsProtocol`

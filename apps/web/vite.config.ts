@@ -18,6 +18,10 @@ export default defineConfig({
 				target: `ws://localhost:${process.env.THINKRAIL_PORT ?? 24242}`,
 				ws: true,
 			},
+			"/proxy": {
+				target: `http://localhost:${process.env.THINKRAIL_PORT ?? 24242}`,
+				changeOrigin: true,
+			},
 		},
 	},
 	build: {

@@ -26,6 +26,22 @@ export {
 	THEME_MODES,
 	TODO_NUDGE_PREFIX,
 } from "./domain";
+export type * from "./hubDomain";
+export {
+	HUB_ACCOUNT_PROVIDERS,
+	HUB_ACCOUNT_STATUSES,
+	HUB_AGENT_TASK_STATUSES,
+	HUB_CHANNEL_KINDS,
+	isHubAccount,
+	isHubAccountProvider,
+	isHubAccountStatus,
+	isHubAgentTask,
+	isHubAgentTaskStatus,
+	isHubChannel,
+	isHubChannelKind,
+	isHubDashboardSummary,
+	isHubMessage,
+} from "./hubDomain";
 export type * from "./nativeClient";
 export type * from "./piProtocol";
 export { assistantToolCallsAreExecutable, isTranscriptMessageRole } from "./piProtocol";

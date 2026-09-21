@@ -3,12 +3,15 @@ import {
 	RiCircleLine as Circle,
 	RiGitBranchLine as GitBranch,
 	RiCircleFill,
+	RiCodeSSlashLine,
+	RiDashboardLine,
 	RiSettings3Line as Settings,
 } from "@remixicon/react";
 import { useEffect, useRef, useState } from "react";
 import { QuietScrollArea } from "../components/QuietScrollArea";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable";
 import { IconTooltip } from "../components/ui/tooltip";
+import { PersonalHubView } from "../hub/PersonalHubView";
 import { AnalyticsConsentDialog } from "../panels/AnalyticsConsentDialog";
 import { InterviewPromptDialog } from "../panels/InterviewPromptDialog";
 import { ProjectTree } from "../panels/ProjectTree";
@@ -22,6 +25,8 @@ import {
 	selectActiveWorkspace,
 	selectAnalyticsConsentPromptOpen,
 	selectContextProject,
+	selectHubTotalUnread,
+	selectViewMode,
 	useAppStore,
 } from "../store";
 import {
@@ -61,6 +66,8 @@ export function Shell() {
 	const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
 	const activeWorkspace = useAppStore(selectActiveWorkspace);
 	const contextProject = useAppStore(selectContextProject);
+	const viewMode = useAppStore(selectViewMode);
+	const hubTotalUnread = useAppStore(selectHubTotalUnread);
 	const { review: openReview } = useOpenBranchReview(activeWorkspace, status);
 	const hasActiveWorkspace = activeWorkspaceId != null;
 	const updates = useUpdates();
@@ -119,7 +126,52 @@ export function Shell() {
 			<header className="flex items-center justify-between border-b border-border-default bg-container-header-bg px-16 py-8">
 				<div className="flex min-w-0 items-center gap-12">
 					<BrandLogo />
-					{contextProject ? (
+					<div
+						role="tablist"
+						aria-label="Mode switch"
+						data-testid="mode-switcher"
+						className="flex items-center rounded-[var(--radius-sm)] bg-control-bg p-2 tr-text-action text-text-muted"
+					>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "ide"}
+							data-testid="mode-switch-ide"
+							onClick={() => useAppStore.getState().setViewMode("ide")}
+							className={`flex items-center gap-8 rounded-[var(--radius-xs)] px-8 py-4 transition-colors ${
+								viewMode === "ide"
+									? "bg-control-bg-selected text-text-default shadow-xs"
+									: "hover:text-text-default"
+							}`}
+						>
+							<RiCodeSSlashLine className="size-14" />
+							<span>IDE</span>
+						</button>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "hub"}
+							data-testid="mode-switch-hub"
+							onClick={() => useAppStore.getState().setViewMode("hub")}
+							className={`flex items-center gap-8 rounded-[var(--radius-xs)] px-8 py-4 transition-colors ${
+								viewMode === "hub"
+									? "bg-control-bg-selected text-text-default shadow-xs"
+									: "hover:text-text-default"
+							}`}
+						>
+							<RiDashboardLine className="size-14" />
+							<span>Personal Hub</span>
+							{hubTotalUnread > 0 ? (
+								<span
+									data-testid="hub-header-unread-badge"
+									className="ml-2 inline-flex items-center justify-center rounded-full bg-feedback-error-subtle px-4 py-2 tr-text-label-pill text-feedback-error"
+								>
+									{hubTotalUnread > 99 ? "99+" : hubTotalUnread}
+								</span>
+							) : null}
+						</button>
+					</div>
+					{viewMode === "ide" && contextProject ? (
 						<div
 							data-testid="scope-context"
 							data-context={activeWorkspace ? "workspace" : "project-home"}
@@ -212,7 +264,11 @@ export function Shell() {
 					}
 				/>
 			</header>
-			{hasActiveWorkspace && activeWorkspaceId ? (
+			{viewMode === "hub" ? (
+				<div data-testid="hub-shell-layout" className="h-full min-h-0 min-w-0">
+					<PersonalHubView />
+				</div>
+			) : hasActiveWorkspace && activeWorkspaceId ? (
 				<div data-testid="workspace-shell-layout" className="h-full min-h-0 min-w-0">
 					<WorkspaceWorkbench key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
 				</div>

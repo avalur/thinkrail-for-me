@@ -92,6 +92,7 @@ import {
 } from "../git";
 import { githubAuthStatus, githubRefresh } from "../github";
 import { clampLimit, getHistoryIndex } from "../history";
+import { hubHandlers } from "../hub";
 import { logger } from "../log";
 import { openPr, previewPr } from "../pr";
 import {
@@ -1014,6 +1015,7 @@ const handlers: Record<string, Handler> = {
 		deleteTemplate(dirs, p.scope, p.name);
 		return { ok: true } as const;
 	},
+	...hubHandlers,
 };
 
 export function requestMethodDiagnostic(method: string): string {
