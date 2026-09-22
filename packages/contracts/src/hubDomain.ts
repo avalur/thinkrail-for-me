@@ -1,3 +1,18 @@
+import type { Workspace } from "./domain";
+
+export const HUB_PROJECT_ID = "hub-personal-agent";
+export const HUB_WORKSPACE_ID = "hub-personal-agent";
+
+export const HUB_WORKSPACE: Workspace = {
+	id: HUB_WORKSPACE_ID,
+	projectId: HUB_PROJECT_ID,
+	name: "Personal Agent",
+	branch: "main",
+	baseBranch: "main",
+	worktreePath: "",
+	kind: "default",
+};
+
 export const HUB_ACCOUNT_PROVIDERS = [
 	"telegram",
 	"email_work",
@@ -162,6 +177,7 @@ export interface HubMarkReadParams {
 	messageIds?: string[];
 	accountId?: string;
 	channelId?: string;
+	provider?: HubAccountProvider;
 	all?: boolean;
 }
 
@@ -183,6 +199,7 @@ export interface HubAccountStatusChangedPayload {
 	status: HubAccountStatus;
 	unreadCount: number;
 	error?: string;
+	metadata?: Record<string, unknown>;
 }
 
 export interface HubSyncStatusPayload {

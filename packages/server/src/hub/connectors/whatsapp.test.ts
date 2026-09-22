@@ -10,7 +10,12 @@ import {
 	initHubSchema,
 	saveAccount,
 } from "../db";
-import { MockWhatsAppClient, WhatsAppConnector, type WhatsAppMessage } from "./whatsapp";
+import {
+	BaileysWhatsAppClient,
+	MockWhatsAppClient,
+	WhatsAppConnector,
+	type WhatsAppMessage,
+} from "./whatsapp";
 
 describe("WhatsApp Connector", () => {
 	let db: Database;
@@ -152,5 +157,25 @@ describe("WhatsApp Connector", () => {
 		expect(saved?.recipientAddress).toBe("+15559876543");
 		expect(saved?.body).toBe("Calling you right now!");
 		expect(saved?.isRead).toBe(true);
+	});
+
+	it("initializes Baileys client when no cloud credentials provided", async () => {
+		const baileysConfig: WhatsAppAccountConfig = {
+			id: "whatsapp-baileys-1",
+			provider: "whatsapp",
+			name: "Personal WhatsApp",
+			enabled: true,
+		};
+
+		const connector = new WhatsAppConnector(baileysConfig);
+		// Should create BaileysWhatsAppClient
+		const client = (connector as any).getClient();
+		expect(client).toBeInstanceOf(BaileysWhatsAppClient);
+
+		const accountInfo = await client.getAccountInfo();
+		expect(accountInfo.id).toBe("whatsapp-baileys-1");
+		expect(accountInfo.name).toBe("Personal WhatsApp");
+
+		await connector.stop();
 	});
 });

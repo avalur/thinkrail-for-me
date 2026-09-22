@@ -37,6 +37,7 @@ mock.module("../transport", () => ({
 const { useAppStore, selectHubTotalUnread } = await import("../store");
 const { TooltipProvider } = await import("../components/ui/tooltip");
 const { PersonalHubView } = await import("./PersonalHubView");
+const { ProxyEmbedView, isDesktopRuntime } = await import("./ProxyEmbedView");
 const { HubAssistantSidebar } = await import("./HubAssistantSidebar");
 const { Shell } = await import("../shell/Shell");
 
@@ -150,6 +151,7 @@ beforeEach(() => {
 		hubAccounts: sampleAccounts,
 		hubDashboard: sampleDashboard,
 		hubMessages: [],
+		hubViewPreference: {},
 		hubLoading: false,
 		hubSyncing: false,
 		hubError: null,
@@ -168,6 +170,7 @@ describe("PersonalHubView Navigation and Badges", () => {
 		expect(html).toContain('data-testid="hub-left-nav"');
 		expect(html).toContain("Channels &amp; Hub");
 		expect(html).toContain('data-testid="hub-nav-tab-dashboard"');
+		expect(html).toContain('data-testid="hub-nav-tab-messages"');
 		expect(html).toContain('data-testid="hub-nav-tab-telegram"');
 		expect(html).toContain('data-testid="hub-nav-tab-email_work"');
 		expect(html).toContain('data-testid="hub-nav-tab-email_personal"');
@@ -272,6 +275,53 @@ describe("Central Viewport Switching", () => {
 		const html = renderToStaticMarkup(<PersonalHubView />);
 		expect(html).toContain("Work Email");
 		expect(html).toContain('src="/proxy/email_work"');
+	});
+
+	test("renders ProxyEmbedView for WhatsApp with helper banner in browser mode", () => {
+		useAppStore.setState({ hubActiveTab: "whatsapp" });
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain("WhatsApp Web");
+		expect(html).toContain('data-testid="whatsapp-browser-banner"');
+		expect(html).toContain('data-testid="whatsapp-open-window-btn"');
+		expect(html).toContain('src="/proxy/whatsapp"');
+	});
+
+	test("renders HubMessagesView when activeTab is messages", () => {
+		useAppStore.setState({ hubActiveTab: "messages" });
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain('data-testid="hub-messages-view"');
+	});
+
+	test("renders HubMessagesView in channel when preference is messages", () => {
+		useAppStore.setState({
+			hubActiveTab: "whatsapp",
+			hubViewPreference: { whatsapp: "messages" },
+		});
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain('data-testid="hub-messages-view"');
+		expect(html).toContain('data-testid="hub-channel-view-toggle"');
+	});
+
+	test("renders native electrobun-webview when running in desktop mode", () => {
+		const g = globalThis as unknown as Record<string, unknown>;
+		const prevId = g.__electrobunWebviewId;
+		try {
+			g.__electrobunWebviewId = 42;
+			expect(isDesktopRuntime()).toBe(true);
+
+			const html = renderToStaticMarkup(<ProxyEmbedView tab="whatsapp" />);
+			expect(html).toContain('data-testid="proxy-electrobun-webview"');
+			expect(html).toContain('src="https://web.whatsapp.com"');
+			expect(html).toContain('partition="whatsapp"');
+			expect(html).toContain("Native Webview Active");
+			expect(html).not.toContain('data-testid="whatsapp-browser-banner"');
+		} finally {
+			if (prevId === undefined) {
+				delete g.__electrobunWebviewId;
+			} else {
+				g.__electrobunWebviewId = prevId;
+			}
+		}
 	});
 });
 

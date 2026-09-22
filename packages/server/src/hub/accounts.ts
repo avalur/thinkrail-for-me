@@ -81,12 +81,14 @@ export interface DiscordAccountConfig extends BaseAccountConfig {
 
 export interface WhatsAppAccountConfig extends BaseAccountConfig {
 	provider: "whatsapp";
+	mode?: "baileys" | "cloud";
 	phoneNumber?: string;
 	apiKey?: string;
 	accessToken?: string;
 	phoneNumberId?: string;
 	apiBaseUrl?: string;
 	sessionData?: string;
+	authDir?: string;
 	pollIntervalMs?: number;
 }
 
@@ -141,6 +143,57 @@ export function loadHubAccountConfigs(): HubAccountsConfigFile {
 		log.warn(`Failed to parse hub-accounts.json at ${filePath}: ${err}`);
 		return { version: 1, accounts: [] };
 	}
+}
+
+export function seedDefaultAccountConfigsIfEmpty(): HubAccountsConfigFile {
+	const current = loadHubAccountConfigs();
+	if (current.accounts.length > 0) return current;
+
+	const defaultConfigs: HubAccountsConfigFile = {
+		version: 1,
+		accounts: [
+			{
+				id: "account_telegram",
+				provider: "telegram",
+				name: "Telegram",
+				enabled: false,
+			},
+			{
+				id: "account_email_work",
+				provider: "email_work",
+				name: "Work Email",
+				enabled: false,
+			},
+			{
+				id: "account_email_personal",
+				provider: "email_personal",
+				name: "Personal Email",
+				enabled: false,
+			},
+			{
+				id: "account_slack",
+				provider: "slack",
+				name: "Slack",
+				enabled: false,
+			},
+			{
+				id: "account_discord",
+				provider: "discord",
+				name: "Discord",
+				enabled: false,
+			},
+			{
+				id: "account_whatsapp",
+				provider: "whatsapp",
+				name: "WhatsApp",
+				enabled: true,
+			},
+		],
+	};
+	try {
+		saveHubAccountConfigs(defaultConfigs);
+	} catch {}
+	return defaultConfigs;
 }
 
 export function saveHubAccountConfigs(config: HubAccountsConfigFile): void {

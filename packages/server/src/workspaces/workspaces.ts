@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type {
-	DiffStats,
-	ExistingWorktreeCandidate,
-	Project,
-	SubagentOverride,
-	Workspace,
+import {
+	type DiffStats,
+	type ExistingWorktreeCandidate,
+	HUB_PROJECT_ID,
+	HUB_WORKSPACE_ID,
+	type Project,
+	type SubagentOverride,
+	type Workspace,
 } from "@thinkrail/contracts";
 import { WORKSPACE_CONTEXT_DIR } from "@thinkrail/shared/paths";
 import {
@@ -483,6 +485,9 @@ export async function listWorkspaces(
 	projectId: string,
 	opts: { includeDiffStats?: boolean } = {},
 ): Promise<Workspace[]> {
+	if (projectId === HUB_PROJECT_ID) {
+		return [getHubWorkspace()];
+	}
 	const project = getProjects().find((p) => p.id === projectId);
 	if (project) ensureDefaultWorkspace(project);
 	for (const workspace of loadWorkspaces()) {
@@ -514,6 +519,9 @@ export function workspaceDiffKey(
 }
 
 export function listWorkspaceRecords(projectId: string): Workspace[] {
+	if (projectId === HUB_PROJECT_ID) {
+		return [getHubWorkspace()];
+	}
 	return loadWorkspaces().filter((w) => w.projectId === projectId);
 }
 
@@ -555,7 +563,34 @@ export async function workspaceDiffStats(id: string): Promise<DiffStats> {
 	return stats;
 }
 
+function getHubWorkspace(): Workspace {
+	const hubDir = join(dataDir(), "hub-workspace");
+	if (!existsSync(hubDir)) {
+		mkdirSync(hubDir, { recursive: true });
+	}
+	const gitDir = join(hubDir, ".git");
+	if (!existsSync(gitDir)) {
+		try {
+			git(hubDir, ["init", "-b", "main"]);
+		} catch {
+			// Non-critical if git init fails
+		}
+	}
+	return {
+		id: HUB_WORKSPACE_ID,
+		projectId: HUB_PROJECT_ID,
+		name: "Personal Agent",
+		branch: "main",
+		baseBranch: "main",
+		worktreePath: hubDir,
+		kind: "default",
+	};
+}
+
 export function getWorkspace(id: string): Workspace {
+	if (id === HUB_WORKSPACE_ID) {
+		return getHubWorkspace();
+	}
 	const ws = loadWorkspaces().find((w) => w.id === id);
 	if (!ws) throw new Error(`Unknown workspace: ${id}`);
 	return ws;

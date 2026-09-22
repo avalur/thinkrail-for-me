@@ -47,6 +47,7 @@ import { isDelegationRunDetails } from "./domain";
 import type {
 	HubAccount,
 	HubAccountProvider,
+	HubChannel,
 	HubDashboardSummary,
 	HubFilter,
 	HubMarkReadParams,
@@ -276,6 +277,7 @@ export const WS_METHODS = {
 	templateSave: "template.save",
 	templateDelete: "template.delete",
 	hubGetAccounts: "hub.getAccounts",
+	hubGetChannels: "hub.getChannels",
 	hubGetMessages: "hub.getMessages",
 	hubGetDashboardSummary: "hub.getDashboardSummary",
 	hubMarkRead: "hub.markRead",
@@ -659,6 +661,10 @@ export interface WsMethodMap {
 	"hub.getAccounts": {
 		params: { provider?: HubAccountProvider } | Record<string, never>;
 		result: { accounts: HubAccount[] };
+	};
+	"hub.getChannels": {
+		params: { accountId?: string } | Record<string, never>;
+		result: { channels: HubChannel[] };
 	};
 	"hub.getMessages": {
 		params: HubFilter;

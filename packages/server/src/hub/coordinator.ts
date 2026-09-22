@@ -6,6 +6,7 @@ import {
 	type HubAccountConfig,
 	loadHubAccountConfigs,
 	type SlackAccountConfig,
+	seedDefaultAccountConfigsIfEmpty,
 	syncAccountsFromConfigToDb,
 	type TelegramAccountConfig,
 	type WhatsAppAccountConfig,
@@ -107,9 +108,10 @@ class HubSyncCoordinator {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
 		}
-		for (const id of this.whatsappConnectors.keys()) {
+		for (const [id, conn] of this.whatsappConnectors.entries()) {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
+			void conn.stop();
 		}
 
 		this.emailConnectors.clear();
@@ -120,7 +122,10 @@ class HubSyncCoordinator {
 	}
 
 	setupConnectorsAndTimers(defaultIntervalMs: number): void {
-		const configFile = loadHubAccountConfigs();
+		let configFile = loadHubAccountConfigs();
+		if (configFile.accounts.length === 0) {
+			configFile = seedDefaultAccountConfigsIfEmpty();
+		}
 
 		for (const acc of configFile.accounts) {
 			if (acc.enabled === false) continue;

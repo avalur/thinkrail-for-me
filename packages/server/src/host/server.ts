@@ -12,6 +12,7 @@ import type {
 } from "@thinkrail/contracts";
 import {
 	FEEDBACK_INTERVIEW_PROTOCOL_VERSION,
+	HUB_WORKSPACE_ID,
 	PROTOCOL_VERSION,
 	WS_CHANNELS,
 } from "@thinkrail/contracts";
@@ -443,6 +444,15 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 
 	setSkillAdmissionResolver((workspaceId) => {
 		try {
+			if (workspaceId === HUB_WORKSPACE_ID) {
+				return {
+					trusted: true,
+					acknowledged: [],
+					disabled: [],
+					disabledGroups: [],
+					overrides: {},
+				};
+			}
 			const { projectId, skillOverrides } = getWorkspace(workspaceId);
 			const project = getProjects().find((p) => p.id === projectId);
 			return {
@@ -459,6 +469,7 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 
 	setSubagentsEnabledResolver((workspaceId) => {
 		try {
+			if (workspaceId === HUB_WORKSPACE_ID) return true;
 			return resolveSubagentsEnabled(getConfig().subagentsEnabled, getWorkspace(workspaceId));
 		} catch {
 			return false;

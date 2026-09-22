@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { HubAgentTask, HubMessage } from "@thinkrail/contracts";
 import { type Static, Type } from "typebox";
-import { getAccounts, getAgentTasks, getDashboardSummary, getMessages, saveAgentTask } from "./db";
+import {
+	getAccounts,
+	getAgentTasks,
+	getChannels,
+	getDashboardSummary,
+	getMessages,
+	saveAgentTask,
+} from "./db";
 import { sendHubMessage } from "./handlers";
 
 // --- Schema Definitions ---
@@ -77,6 +84,36 @@ export const HubSearchMessagesSchema = Type.Object({
 	),
 });
 export type HubSearchMessagesParams = Static<typeof HubSearchMessagesSchema>;
+
+export const HUB_LIST_CHANNELS_TOOL_NAME = "hub_list_channels";
+export const HubListChannelsSchema = Type.Object({
+	accountId: Type.Optional(
+		Type.String({
+			description: "Optional account ID to filter channels/groups by.",
+		}),
+	),
+	provider: Type.Optional(HubAccountProviderSchema),
+	search: Type.Optional(
+		Type.String({
+			description:
+				"Search keyword to match against channel or group names (e.g. 'Parents Support Group').",
+		}),
+	),
+	limit: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 100,
+			description: "Max number of channels to return (default: 50).",
+		}),
+	),
+	offset: Type.Optional(
+		Type.Integer({
+			minimum: 0,
+			description: "Pagination offset (default: 0).",
+		}),
+	),
+});
+export type HubListChannelsParams = Static<typeof HubListChannelsSchema>;
 
 export const HUB_SEND_EMAIL_TOOL_NAME = "hub_send_email";
 export const HubSendEmailSchema = Type.Object({
@@ -236,9 +273,13 @@ export type HubSummarizeInboxParams = Static<typeof HubSummarizeInboxSchema>;
 function formatMessageItem(msg: HubMessage): string {
 	const urgencyTag = msg.isUrgent ? "🚨 **[URGENT]** " : "";
 	const readTag = msg.isRead ? "" : "🔵 [UNREAD] ";
-	const subjectPart = msg.subject ? `*${msg.subject}*: ` : "";
+	const groupName =
+		(msg.metadata?.groupName as string | undefined) ||
+		(msg.metadata?.isGroup ? msg.subject : undefined) ||
+		msg.subject;
+	const groupPart = groupName ? `[Group/Topic: **${groupName}**] ` : "";
 	const dateStr = new Date(msg.timestamp).toISOString();
-	return `- [${msg.id}] ${urgencyTag}${readTag}**${msg.senderName}** (${msg.senderAddress}): ${subjectPart}${msg.snippet} *(Account: ${msg.accountId}, ${dateStr})*`;
+	return `- [${msg.id}] ${urgencyTag}${readTag}${groupPart}**${msg.senderName}** (${msg.senderAddress}): ${msg.snippet} *(Account: ${msg.accountId}, ${dateStr})*`;
 }
 
 // --- Tool Implementations ---
@@ -352,6 +393,75 @@ export function createHubSearchMessagesTool(): ToolDefinition<typeof HubSearchMe
 					count: result.messages.length,
 					hasMore: result.hasMore,
 					messages: result.messages,
+				},
+			};
+		},
+	};
+}
+
+export function createHubListChannelsTool(): ToolDefinition<typeof HubListChannelsSchema> {
+	return {
+		name: HUB_LIST_CHANNELS_TOOL_NAME,
+		label: "List Channels & Groups",
+		description:
+			"Lists available communication channels, groups, and chats with their human-readable names (e.g. 'Parents Support Group'), remote IDs, unread counts, and providers. Use this tool when looking up a specific group or chat by name.",
+		parameters: HubListChannelsSchema,
+		async execute(_toolCallId, params) {
+			const { accountId, provider, search, limit = 50, offset = 0 } = params;
+			let channels = getChannels(accountId);
+
+			if (provider) {
+				const accounts = getAccounts(provider);
+				const accountIdSet = new Set(accounts.map((a) => a.id));
+				channels = channels.filter((c) => accountIdSet.has(c.accountId));
+			}
+
+			if (search) {
+				const lowerSearch = search.toLowerCase();
+				channels = channels.filter(
+					(c) =>
+						c.name.toLowerCase().includes(lowerSearch) ||
+						c.remoteId.toLowerCase().includes(lowerSearch) ||
+						c.id.toLowerCase().includes(lowerSearch),
+				);
+			}
+
+			const total = channels.length;
+			const paged = channels.slice(offset, offset + limit);
+
+			if (paged.length === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: search
+								? `No channels or groups found matching "${search}".`
+								: "No channels or groups found.",
+						},
+					],
+					details: { total: 0, count: 0, channels: [] },
+				};
+			}
+
+			const lines = paged.map((c) => {
+				const kindTag = c.kind ? ` [${c.kind}]` : "";
+				const unreadTag = c.unreadCount > 0 ? ` (🔵 ${c.unreadCount} unread)` : "";
+				const lastActive = c.lastMessageAt
+					? ` *(last active: ${new Date(c.lastMessageAt).toISOString()})*`
+					: "";
+				return `- **${c.name}** (channelId: \`${c.id}\`, remoteId: \`${c.remoteId}\`)${kindTag}${unreadTag}${lastActive}`;
+			});
+
+			const header = `### Communication Channels & Groups (${paged.length} of ${total})\n\n`;
+			const footer =
+				offset + limit < total ? `\n\n*(More channels available, offset: ${offset + limit})*` : "";
+
+			return {
+				content: [{ type: "text", text: `${header}${lines.join("\n")}${footer}` }],
+				details: {
+					total,
+					count: paged.length,
+					channels: paged,
 				},
 			};
 		},
@@ -920,6 +1030,7 @@ export function createHubSummarizeInboxTool(): ToolDefinition<typeof HubSummariz
 
 export function hubToolsExtension(pi: ExtensionAPI): void {
 	pi.registerTool(createHubListUnreadTool());
+	pi.registerTool(createHubListChannelsTool());
 	pi.registerTool(createHubSearchMessagesTool());
 	pi.registerTool(createHubSendEmailTool());
 	pi.registerTool(createHubSendTelegramTool());

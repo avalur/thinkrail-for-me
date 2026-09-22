@@ -2,8 +2,11 @@ import {
 	type RemixiconComponentType,
 	RiAlertLine,
 	RiArrowRightSLine,
+	RiChat1Line,
+	RiCheckDoubleLine,
 	RiCheckLine,
 	RiDiscordLine,
+	RiExternalLinkLine,
 	RiInboxLine,
 	RiMailLine,
 	RiRefreshLine,
@@ -15,9 +18,11 @@ import {
 	RiWhatsappLine,
 } from "@remixicon/react";
 import type { HubAccountProvider, HubMessage } from "@thinkrail/contracts";
+import type React from "react";
 import { useState } from "react";
 import { useAppStore } from "../store";
 import { getTransport } from "../transport";
+import { HubContextMenu, type HubContextMenuItem } from "./HubContextMenu";
 
 const PROVIDER_ICONS: Record<HubAccountProvider, RemixiconComponentType> = {
 	telegram: RiTelegramLine,
@@ -42,12 +47,87 @@ export function DashboardView() {
 	const accounts = useAppStore((s) => s.hubAccounts);
 	const syncing = useAppStore((s) => s.hubSyncing);
 	const [markingReadId, setMarkingReadId] = useState<string | null>(null);
+	const [contextMenu, setContextMenu] = useState<{
+		x: number;
+		y: number;
+		items: HubContextMenuItem[];
+	} | null>(null);
 
 	const totalUnread =
 		dashboard?.totalUnread ?? accounts.reduce((sum, acc) => sum + (acc.unreadCount || 0), 0);
 	const urgentMessages = dashboard?.urgentMessages ?? [];
 	const recentActivity = dashboard?.recentActivity ?? [];
 	const connectedAccountsCount = accounts.filter((a) => a.status === "connected").length;
+
+	const handleChannelContextMenu = (
+		e: React.MouseEvent,
+		ch: { id: string; label: string; provider: HubAccountProvider },
+	) => {
+		e.preventDefault();
+		const matchedAccounts = accounts.filter((a) => a.provider === ch.provider);
+		const acc = matchedAccounts[0];
+
+		const menuItems: HubContextMenuItem[] = [
+			{
+				label: "Показать непрочитанные",
+				icon: RiMailLine,
+				action: () => {
+					useAppStore.getState().setHubActiveTab(ch.id);
+					useAppStore.getState().setHubViewPreference(ch.id, "messages");
+					useAppStore.getState().setHubFilter({ provider: ch.provider, unreadOnly: true });
+				},
+			},
+			{
+				label: "Показать все сообщения (БД)",
+				icon: RiChat1Line,
+				action: () => {
+					useAppStore.getState().setHubActiveTab(ch.id);
+					useAppStore.getState().setHubViewPreference(ch.id, "messages");
+					useAppStore.getState().setHubFilter({ provider: ch.provider, unreadOnly: false });
+				},
+			},
+			{
+				label: "Отметить прочитанными",
+				icon: RiCheckDoubleLine,
+				action: async () => {
+					if (acc) {
+						await getTransport().request("hub.markRead", { accountId: acc.id, all: true });
+					} else {
+						await getTransport().request("hub.markRead", { provider: ch.provider, all: true });
+					}
+					const summary = await getTransport().request("hub.getDashboardSummary", {});
+					if (summary) useAppStore.getState().setHubDashboard(summary);
+					const accRes = await getTransport().request("hub.getAccounts", {});
+					if (accRes?.accounts) useAppStore.getState().setHubAccounts(accRes.accounts);
+				},
+			},
+			{
+				label: "Открыть веб-клиент",
+				icon: RiExternalLinkLine,
+				action: () => {
+					useAppStore.getState().setHubActiveTab(ch.id);
+					useAppStore.getState().setHubViewPreference(ch.id, "web");
+				},
+			},
+			{
+				label: "Синхронизировать",
+				icon: RiRefreshLine,
+				action: async () => {
+					if (acc) {
+						await getTransport().request("hub.syncNow", { accountId: acc.id, force: true });
+					} else {
+						await handleSync();
+					}
+				},
+			},
+		];
+
+		setContextMenu({
+			x: e.clientX,
+			y: e.clientY,
+			items: menuItems,
+		});
+	};
 
 	const handleSync = async () => {
 		try {
@@ -278,6 +358,7 @@ export function DashboardView() {
 									type="button"
 									data-testid={`channel-card-${ch.id}`}
 									onClick={() => useAppStore.getState().setHubActiveTab(ch.id)}
+									onContextMenu={(e) => handleChannelContextMenu(e, ch)}
 									className="flex flex-col justify-between rounded-[var(--radius-sm)] border border-border-default bg-container-sidebar-bg p-12 text-left transition-colors hover:bg-control-bg"
 								>
 									<div className="flex items-center justify-between">
@@ -503,6 +584,16 @@ export function DashboardView() {
 					</div>
 				</div>
 			</div>
+
+			{/* Context Menu for Channels */}
+			{contextMenu && (
+				<HubContextMenu
+					x={contextMenu.x}
+					y={contextMenu.y}
+					onClose={() => setContextMenu(null)}
+					items={contextMenu.items}
+				/>
+			)}
 		</div>
 	);
 }

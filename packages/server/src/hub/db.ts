@@ -404,19 +404,37 @@ export function updateAccountStatus(
 	unreadCount?: number,
 	error?: string | null,
 	database?: Database,
+	metadata?: Record<string, unknown>,
 ): void {
 	const db = database ?? getHubDb();
+	const metaStr = metadata !== undefined ? JSON.stringify(metadata) : null;
 	if (unreadCount !== undefined) {
-		db.run(
-			"UPDATE hub_accounts SET status = ?, unread_count = ?, error = ?, last_sync_at = ? WHERE id = ?;",
-			[status, unreadCount, error ?? null, Date.now(), id],
-		);
+		if (metaStr !== null) {
+			db.run(
+				"UPDATE hub_accounts SET status = ?, unread_count = ?, error = ?, last_sync_at = ?, metadata = ? WHERE id = ?;",
+				[status, unreadCount, error ?? null, Date.now(), metaStr, id],
+			);
+		} else {
+			db.run(
+				"UPDATE hub_accounts SET status = ?, unread_count = ?, error = ?, last_sync_at = ? WHERE id = ?;",
+				[status, unreadCount, error ?? null, Date.now(), id],
+			);
+		}
 	} else {
-		db.run("UPDATE hub_accounts SET status = ?, error = ? WHERE id = ?;", [
-			status,
-			error ?? null,
-			id,
-		]);
+		if (metaStr !== null) {
+			db.run("UPDATE hub_accounts SET status = ?, error = ?, metadata = ? WHERE id = ?;", [
+				status,
+				error ?? null,
+				metaStr,
+				id,
+			]);
+		} else {
+			db.run("UPDATE hub_accounts SET status = ?, error = ? WHERE id = ?;", [
+				status,
+				error ?? null,
+				id,
+			]);
+		}
 	}
 }
 
@@ -474,13 +492,19 @@ export function getChannel(id: string, database?: Database): HubChannel | null {
 	return row ? fromChannelRow(row) : null;
 }
 
-export function getChannels(accountId: string, database?: Database): HubChannel[] {
+export function getChannels(accountId?: string, database?: Database): HubChannel[] {
 	const db = database ?? getHubDb();
+	if (accountId) {
+		const rows = db
+			.query(
+				"SELECT * FROM hub_channels WHERE account_id = ? ORDER BY last_message_at DESC, name ASC;",
+			)
+			.all(accountId) as ChannelRow[];
+		return rows.map(fromChannelRow);
+	}
 	const rows = db
-		.query(
-			"SELECT * FROM hub_channels WHERE account_id = ? ORDER BY last_message_at DESC, name ASC;",
-		)
-		.all(accountId) as ChannelRow[];
+		.query("SELECT * FROM hub_channels ORDER BY last_message_at DESC, name ASC;")
+		.all() as ChannelRow[];
 	return rows.map(fromChannelRow);
 }
 
@@ -791,6 +815,9 @@ export function markMessagesRead(params: HubMarkReadParams, database?: Database)
 		} else if (params.channelId) {
 			conditions.push("channel_id = ?");
 			queryParams.push(params.channelId);
+		} else if (params.provider) {
+			conditions.push("account_id IN (SELECT id FROM hub_accounts WHERE provider = ?)");
+			queryParams.push(params.provider);
 		}
 	} else if (params.messageIds && params.messageIds.length > 0) {
 		const placeholders = params.messageIds.map(() => "?").join(",");
@@ -802,6 +829,9 @@ export function markMessagesRead(params: HubMarkReadParams, database?: Database)
 	} else if (params.channelId) {
 		conditions.push("channel_id = ?");
 		queryParams.push(params.channelId);
+	} else if (params.provider) {
+		conditions.push("account_id IN (SELECT id FROM hub_accounts WHERE provider = ?)");
+		queryParams.push(params.provider);
 	} else {
 		return 0;
 	}

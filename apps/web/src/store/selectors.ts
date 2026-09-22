@@ -2,8 +2,12 @@ import {
 	type ActivityStatus,
 	ANALYTICS_CONSENT_PROTOCOL_VERSION,
 	type GitDiffScope,
+	HUB_WORKSPACE,
+	HUB_WORKSPACE_ID,
 	type HubAccount,
+	type HubChannel,
 	type HubDashboardSummary,
+	type HubFilter,
 	type Project,
 	SESSION_RENAME_PROTOCOL_VERSION,
 	type SpecGraphNode,
@@ -228,6 +232,7 @@ export function selectWorkspaceById(
 	state: ActiveWorkspaceState,
 	workspaceId: string,
 ): Workspace | null {
+	if (workspaceId === HUB_WORKSPACE_ID) return HUB_WORKSPACE;
 	for (const workspaces of Object.values(state.workspaces)) {
 		const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
 		if (workspace) return workspace;
@@ -583,4 +588,21 @@ export function selectHubSyncing(state: { hubSyncing: boolean }): boolean {
 
 export function selectHubError(state: { hubError: string | null }): string | null {
 	return state.hubError;
+}
+
+export function selectHubFilter(state: {
+	hubFilter: HubFilter & { unreadOnly?: boolean };
+}): HubFilter & { unreadOnly?: boolean } {
+	return state.hubFilter;
+}
+
+export function selectHubChannels(state: { hubChannels: HubChannel[] }): HubChannel[] {
+	return state.hubChannels;
+}
+
+export function selectHubViewPreference(
+	state: { hubViewPreference: Record<string, "messages" | "web"> },
+	tab: string,
+): "messages" | "web" {
+	return state.hubViewPreference[tab] ?? (tab === "whatsapp" ? "messages" : "web");
 }

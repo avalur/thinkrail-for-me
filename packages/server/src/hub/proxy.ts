@@ -32,14 +32,28 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 export function rewriteCspForFraming(csp: string): string | null {
-	const directives = csp
-		.split(";")
-		.map((d) => d.trim())
+	// A CSP header can contain multiple comma-separated policies (e.g. when upstream sends multiple CSP headers).
+	// Within each policy, directives are separated by semicolons.
+	const policies = csp
+		.split(",")
+		.map((p) => p.trim())
 		.filter(Boolean);
+	const rewrittenPolicies: string[] = [];
 
-	const filtered = directives.filter((d) => !d.toLowerCase().startsWith("frame-ancestors"));
+	for (const policy of policies) {
+		const directives = policy
+			.split(";")
+			.map((d) => d.trim().replace(/^,+/, "").trim())
+			.filter(Boolean);
 
-	return filtered.length > 0 ? filtered.join("; ") : null;
+		const filtered = directives.filter((d) => !d.toLowerCase().startsWith("frame-ancestors"));
+
+		if (filtered.length > 0) {
+			rewrittenPolicies.push(filtered.join("; "));
+		}
+	}
+
+	return rewrittenPolicies.length > 0 ? rewrittenPolicies.join("; ") : null;
 }
 
 export function rewriteLocation(
@@ -289,6 +303,7 @@ export async function handleProxyRequest(req: Request): Promise<Response> {
 		"Access-Control-Allow-Methods",
 		"GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS",
 	);
+	responseHeaders.set("Permissions-Policy", "focus-without-user-activation=()");
 
 	// Handle HTML base tag injection
 	const contentType = upstreamResponse.headers.get("content-type") ?? "";

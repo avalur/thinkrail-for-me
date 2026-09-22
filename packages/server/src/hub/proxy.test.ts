@@ -152,6 +152,16 @@ describe("Hub Reverse-Proxy Gateway", () => {
 			expect(rewritten).toContain("script-src 'self' 'unsafe-inline'");
 		});
 
+		test("removes frame-ancestors from multiple comma-separated policies (e.g. WhatsApp)", () => {
+			const csp =
+				"default-src 'self' blob:; block-all-mixed-content; upgrade-insecure-requests; , frame-ancestors https://*.whatsapp.com https://whatsapp.com;";
+			const rewritten = rewriteCspForFraming(csp);
+			expect(rewritten).not.toBeNull();
+			expect(rewritten).not.toContain("frame-ancestors");
+			expect(rewritten).toContain("default-src 'self' blob:");
+			expect(rewritten).toContain("upgrade-insecure-requests");
+		});
+
 		test("returns null if frame-ancestors is the only directive", () => {
 			const csp = "frame-ancestors 'self' https://trusted.com";
 			expect(rewriteCspForFraming(csp)).toBeNull();

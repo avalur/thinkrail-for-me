@@ -8,8 +8,11 @@ import type {
 	HostPlatform,
 	HostUpdateNotice,
 	HubAccount,
+	HubAccountProvider,
 	HubAccountStatusChangedPayload,
+	HubChannel,
 	HubDashboardSummary,
+	HubFilter,
 	HubMessage,
 	HubSyncStatusPayload,
 	LayoutPreset,
@@ -42,6 +45,9 @@ import type {
 import {
 	customMessageText,
 	DEFAULT_CONFIG,
+	HUB_PROJECT_ID,
+	HUB_WORKSPACE,
+	HUB_WORKSPACE_ID,
 	isAskUserAnswersMessage,
 	isControlMessage,
 	isLineWidth,
@@ -836,6 +842,9 @@ interface AppState {
 	hubAccounts: HubAccount[];
 	hubDashboard: HubDashboardSummary | null;
 	hubMessages: HubMessage[];
+	hubChannels: HubChannel[];
+	hubFilter: HubFilter & { unreadOnly?: boolean };
+	hubViewPreference: Record<string, "messages" | "web">;
 	hubLoading: boolean;
 	hubSyncing: boolean;
 	hubError: string | null;
@@ -849,6 +858,9 @@ interface AppState {
 	setHubAccounts: (accounts: HubAccount[]) => void;
 	setHubDashboard: (dashboard: HubDashboardSummary | null) => void;
 	setHubMessages: (messages: HubMessage[]) => void;
+	setHubChannels: (channels: HubChannel[]) => void;
+	setHubFilter: (filter: Partial<HubFilter & { unreadOnly?: boolean }>) => void;
+	setHubViewPreference: (tab: string, pref: "messages" | "web") => void;
 	setHubLoading: (loading: boolean) => void;
 	setHubSyncing: (syncing: boolean) => void;
 	setHubError: (error: string | null) => void;
@@ -1678,7 +1690,9 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		hostUpdate: null,
 		projects: [],
 		recentProjects: [],
-		workspaces: {},
+		workspaces: {
+			[HUB_PROJECT_ID]: [HUB_WORKSPACE],
+		},
 		removedWorkspaceIds: Object.create(null) as Record<string, true>,
 		activityByWorkspace: Object.create(null) as Record<string, WorkspaceActivity>,
 		expandedProjectIds: Object.create(null) as Record<string, true>,
@@ -1757,6 +1771,9 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		hubAccounts: [],
 		hubDashboard: null,
 		hubMessages: [],
+		hubChannels: [],
+		hubFilter: {},
+		hubViewPreference: {},
 		hubLoading: false,
 		hubSyncing: false,
 		hubError: null,
@@ -1770,6 +1787,10 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		setHubAccounts: (hubAccounts) => set({ hubAccounts }),
 		setHubDashboard: (hubDashboard) => set({ hubDashboard }),
 		setHubMessages: (hubMessages) => set({ hubMessages }),
+		setHubChannels: (hubChannels) => set({ hubChannels }),
+		setHubFilter: (filter) => set((state) => ({ hubFilter: { ...state.hubFilter, ...filter } })),
+		setHubViewPreference: (tab, pref) =>
+			set((state) => ({ hubViewPreference: { ...state.hubViewPreference, [tab]: pref } })),
 		setHubLoading: (hubLoading) => set({ hubLoading }),
 		setHubSyncing: (hubSyncing) => set({ hubSyncing }),
 		setHubError: (hubError) => set({ hubError }),
@@ -1832,6 +1853,9 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 							...acc,
 							status: payload.status,
 							unreadCount: payload.unreadCount,
+							...(payload.metadata !== undefined
+								? { metadata: { ...acc.metadata, ...payload.metadata } }
+								: {}),
 						};
 						if (payload.error !== undefined) {
 							updated.error = payload.error;

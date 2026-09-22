@@ -22,7 +22,7 @@ import type {
 	WireModel,
 	Workspace,
 } from "@thinkrail/contracts";
-import { isControlMessage } from "@thinkrail/contracts";
+import { HUB_WORKSPACE_ID, isControlMessage } from "@thinkrail/contracts";
 import {
 	abortSession,
 	answerQuestion,
@@ -630,7 +630,7 @@ const handlers: Record<string, Handler> = {
 		const ws = getWorkspace(workspaceId);
 		const project = listProjects().find((p) => p.id === ws.projectId);
 		return listSkillCatalog(ws.worktreePath, {
-			trusted: project?.trusted === true,
+			trusted: project?.trusted === true || ws.id === HUB_WORKSPACE_ID,
 			acknowledged: project?.acknowledgedSkills ?? [],
 			disabled: project?.disabledSkills ?? [],
 			disabledGroups: project?.disabledGroups ?? [],

@@ -5,8 +5,16 @@ import { join } from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { HubAccount, HubMessage } from "@thinkrail/contracts";
 import type { Static, TSchema } from "typebox";
-import { getAgentTasks, initHubDb, saveAccount, saveMessage, setHubDbForTesting } from "./db";
 import {
+	getAgentTasks,
+	initHubDb,
+	saveAccount,
+	saveChannel,
+	saveMessage,
+	setHubDbForTesting,
+} from "./db";
+import {
+	createHubListChannelsTool,
 	createHubListUnreadTool,
 	createHubSearchMessagesTool,
 	createHubSendDiscordTool,
@@ -465,8 +473,43 @@ describe("Personal Hub Agent Tools", () => {
 		});
 	});
 
+	describe("hub_list_channels", () => {
+		it("lists channels and groups by human readable name and supports search", async () => {
+			const { whatsapp } = seedTestAccounts();
+			saveChannel({
+				id: "wa-120363410777648689@g.us",
+				accountId: whatsapp.id,
+				remoteId: "120363410777648689@g.us",
+				name: "Parents Support Group",
+				kind: "group",
+				unreadCount: 3,
+				lastMessageAt: Date.now(),
+			});
+			saveChannel({
+				id: "wa-120363411848343176@g.us",
+				accountId: whatsapp.id,
+				remoteId: "120363411848343176@g.us",
+				name: "IOAI Cyprus Camp",
+				kind: "group",
+				unreadCount: 0,
+				lastMessageAt: Date.now(),
+			});
+
+			const tool = createHubListChannelsTool();
+			const resultAll = await executeTool(tool, "call_ch_all", {});
+			const textAll = getResultText(resultAll);
+			expect(textAll).toContain("Parents Support Group");
+			expect(textAll).toContain("IOAI Cyprus Camp");
+
+			const resultSearch = await executeTool(tool, "call_ch_search", { search: "Parents" });
+			const textSearch = getResultText(resultSearch);
+			expect(textSearch).toContain("Parents Support Group");
+			expect(textSearch).not.toContain("IOAI Cyprus Camp");
+		});
+	});
+
 	describe("hubToolsExtension", () => {
-		it("registers all 8 hub tools with ExtensionAPI", () => {
+		it("registers all 9 hub tools with ExtensionAPI", () => {
 			const registeredTools: Array<ToolDefinition<TSchema, unknown>> = [];
 			const mockPi = {
 				registerTool(tool: ToolDefinition<TSchema, unknown>) {
@@ -478,6 +521,7 @@ describe("Personal Hub Agent Tools", () => {
 
 			const names = registeredTools.map((t) => t.name);
 			expect(names).toContain("hub_list_unread");
+			expect(names).toContain("hub_list_channels");
 			expect(names).toContain("hub_search_messages");
 			expect(names).toContain("hub_send_email");
 			expect(names).toContain("hub_send_telegram");
@@ -485,7 +529,7 @@ describe("Personal Hub Agent Tools", () => {
 			expect(names).toContain("hub_send_discord");
 			expect(names).toContain("hub_send_whatsapp");
 			expect(names).toContain("hub_summarize_inbox");
-			expect(registeredTools.length).toBe(8);
+			expect(registeredTools.length).toBe(9);
 		});
 	});
 

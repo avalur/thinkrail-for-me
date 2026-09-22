@@ -80,6 +80,7 @@ test("hub features advance the protocol and name channels and methods", () => {
 	expect(HUB_PROTOCOL_VERSION).toBe(67);
 	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(HUB_PROTOCOL_VERSION);
 	expect(WS_METHODS.hubGetAccounts).toBe("hub.getAccounts");
+	expect(WS_METHODS.hubGetChannels).toBe("hub.getChannels");
 	expect(WS_METHODS.hubGetMessages).toBe("hub.getMessages");
 	expect(WS_METHODS.hubGetDashboardSummary).toBe("hub.getDashboardSummary");
 	expect(WS_METHODS.hubMarkRead).toBe("hub.markRead");

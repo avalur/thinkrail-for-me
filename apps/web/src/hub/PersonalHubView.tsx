@@ -1,7 +1,10 @@
 import {
 	type RemixiconComponentType,
+	RiChat1Line,
+	RiCheckDoubleLine,
 	RiDashboardLine,
 	RiDiscordLine,
+	RiExternalLinkLine,
 	RiMailLine,
 	RiRefreshLine,
 	RiSettings3Line,
@@ -10,12 +13,16 @@ import {
 	RiTelegramLine,
 	RiWhatsappLine,
 } from "@remixicon/react";
-import { useEffect } from "react";
+import type { HubAccountProvider } from "@thinkrail/contracts";
+import type React from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../store";
 import { getTransport } from "../transport";
 import { AccountSettingsView } from "./AccountSettingsView";
 import { DashboardView } from "./DashboardView";
 import { HubAssistantSidebar } from "./HubAssistantSidebar";
+import { HubContextMenu, type HubContextMenuItem } from "./HubContextMenu";
+import { HubMessagesView } from "./HubMessagesView";
 import { ProxyEmbedView } from "./ProxyEmbedView";
 
 interface NavItem {
@@ -30,6 +37,11 @@ const NAV_ITEMS: NavItem[] = [
 		id: "dashboard",
 		label: "Dashboard",
 		icon: RiDashboardLine,
+	},
+	{
+		id: "messages",
+		label: "Messages",
+		icon: RiChat1Line,
 	},
 	{
 		id: "telegram",
@@ -80,6 +92,131 @@ export function PersonalHubView() {
 	const dashboard = useAppStore((s) => s.hubDashboard);
 	const syncing = useAppStore((s) => s.hubSyncing);
 	const assistantOpen = useAppStore((s) => s.hubAssistantSidebarOpen);
+	const [contextMenu, setContextMenu] = useState<{
+		x: number;
+		y: number;
+		items: HubContextMenuItem[];
+	} | null>(null);
+
+	const handleContextMenu = (e: React.MouseEvent, item: NavItem) => {
+		e.preventDefault();
+		const menuItems: HubContextMenuItem[] = [];
+
+		if (item.id === "dashboard") {
+			menuItems.push(
+				{
+					label: "Отметить всё прочитанным",
+					icon: RiCheckDoubleLine,
+					action: async () => {
+						await getTransport().request("hub.markRead", { all: true });
+						const accRes = (await getTransport().request("hub.getAccounts", {})) as {
+							accounts?: unknown[];
+						};
+						if (accRes?.accounts) useAppStore.getState().setHubAccounts(accRes.accounts as any);
+						const dashRes = await getTransport().request("hub.getDashboardSummary", {});
+						if (dashRes) useAppStore.getState().setHubDashboard(dashRes as any);
+					},
+				},
+				{
+					label: "Синхронизировать всё",
+					icon: RiRefreshLine,
+					action: () => void handleSync(),
+				},
+			);
+		} else if (item.providerMatch && item.providerMatch.length > 0) {
+			const provider = item.providerMatch[0] as HubAccountProvider;
+			const acc = accounts.find((a) => a.provider === provider);
+
+			menuItems.push(
+				{
+					label: "Показать непрочитанные",
+					icon: RiMailLine,
+					action: () => {
+						useAppStore.getState().setHubActiveTab(item.id);
+						useAppStore.getState().setHubViewPreference(item.id, "messages");
+						useAppStore.getState().setHubFilter({ provider, unreadOnly: true });
+					},
+				},
+				{
+					label: "Показать все сообщения (БД)",
+					icon: RiChat1Line,
+					action: () => {
+						useAppStore.getState().setHubActiveTab(item.id);
+						useAppStore.getState().setHubViewPreference(item.id, "messages");
+						useAppStore.getState().setHubFilter({ provider, unreadOnly: false });
+					},
+				},
+				{
+					label: "Отметить прочитанными",
+					icon: RiCheckDoubleLine,
+					action: async () => {
+						if (acc) {
+							await getTransport().request("hub.markRead", { accountId: acc.id, all: true });
+						} else {
+							await getTransport().request("hub.markRead", { provider, all: true });
+						}
+						const accRes = (await getTransport().request("hub.getAccounts", {})) as {
+							accounts?: unknown[];
+						};
+						if (accRes?.accounts) useAppStore.getState().setHubAccounts(accRes.accounts as any);
+						const dashRes = await getTransport().request("hub.getDashboardSummary", {});
+						if (dashRes) useAppStore.getState().setHubDashboard(dashRes as any);
+					},
+				},
+				{
+					label: "Открыть веб-клиент",
+					icon: RiExternalLinkLine,
+					action: () => {
+						useAppStore.getState().setHubActiveTab(item.id);
+						useAppStore.getState().setHubViewPreference(item.id, "web");
+					},
+				},
+				{
+					label: "Синхронизировать",
+					icon: RiRefreshLine,
+					action: async () => {
+						if (acc) {
+							await getTransport().request("hub.syncNow", { accountId: acc.id, force: true });
+						} else {
+							await handleSync();
+						}
+					},
+				},
+			);
+		} else if (item.id === "messages") {
+			menuItems.push(
+				{
+					label: "Показать только непрочитанные",
+					icon: RiMailLine,
+					action: () => {
+						useAppStore.getState().setHubActiveTab("messages");
+						useAppStore.getState().setHubFilter({ unreadOnly: true });
+					},
+				},
+				{
+					label: "Отметить всё прочитанным",
+					icon: RiCheckDoubleLine,
+					action: async () => {
+						await getTransport().request("hub.markRead", { all: true });
+						const accRes = (await getTransport().request("hub.getAccounts", {})) as {
+							accounts?: unknown[];
+						};
+						if (accRes?.accounts) useAppStore.getState().setHubAccounts(accRes.accounts as any);
+						const dashRes = await getTransport().request("hub.getDashboardSummary", {});
+						if (dashRes) useAppStore.getState().setHubDashboard(dashRes as any);
+					},
+				},
+			);
+		}
+
+		if (menuItems.length > 0) {
+			setContextMenu({
+				x: e.clientX,
+				y: e.clientY,
+				items: menuItems,
+			});
+		}
+	};
 
 	useEffect(() => {
 		let isMounted = true;
@@ -141,7 +278,7 @@ export function PersonalHubView() {
 			{/* Left Navigation Rail */}
 			<nav
 				data-testid="hub-left-nav"
-				className="flex w-60 shrink-0 flex-col justify-between border-r border-border-default bg-container-sidebar-bg p-8"
+				className="flex w-[240px] shrink-0 flex-col justify-between border-r border-border-default bg-container-sidebar-bg p-8"
 			>
 				<div className="space-y-4">
 					<div className="px-8 py-8 tr-text-eyebrow text-text-muted">Channels & Hub</div>
@@ -158,6 +295,7 @@ export function PersonalHubView() {
 									type="button"
 									data-testid={`hub-nav-tab-${item.id}`}
 									onClick={() => useAppStore.getState().setHubActiveTab(item.id)}
+									onContextMenu={(e) => handleContextMenu(e, item)}
 									className={`flex w-full items-center justify-between rounded-[var(--radius-sm)] px-12 py-8 tr-text-action transition-colors ${
 										isActive
 											? "bg-control-bg-selected text-text-default shadow-xs"
@@ -231,15 +369,29 @@ export function PersonalHubView() {
 			<main className="flex-1 min-h-0 min-w-0 overflow-hidden bg-container-content-bg">
 				{activeTab === "dashboard" ? (
 					<DashboardView />
+				) : activeTab === "messages" ? (
+					<HubMessagesView />
 				) : activeTab === "accounts" ? (
 					<AccountSettingsView />
 				) : (
-					<ProxyEmbedView tab={activeTab} />
+					<div data-testid="hub-proxy-embed-view" className="h-full min-h-0 flex-1">
+						<ProxyEmbedView tab={activeTab} />
+					</div>
 				)}
 			</main>
 
 			{/* Right Collapsible AI Assistant Sidebar */}
 			<HubAssistantSidebar />
+
+			{/* Context Menu for Channels & Hub */}
+			{contextMenu && (
+				<HubContextMenu
+					x={contextMenu.x}
+					y={contextMenu.y}
+					onClose={() => setContextMenu(null)}
+					items={contextMenu.items}
+				/>
+			)}
 		</div>
 	);
 }

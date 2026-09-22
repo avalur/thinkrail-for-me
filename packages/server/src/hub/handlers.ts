@@ -14,6 +14,7 @@ import {
 import {
 	getAccount,
 	getAccounts,
+	getChannels,
 	getDashboardSummary,
 	getMessages,
 	markMessagesRead,
@@ -107,6 +108,11 @@ export const hubHandlers: Record<
 			accounts = seedDefaultAccountsIfEmpty();
 		}
 		return { accounts };
+	},
+
+	[WS_METHODS.hubGetChannels]: (params) => {
+		const p = (params ?? {}) as { accountId?: string };
+		return { channels: getChannels(p.accountId) };
 	},
 
 	[WS_METHODS.hubGetMessages]: (params) => {

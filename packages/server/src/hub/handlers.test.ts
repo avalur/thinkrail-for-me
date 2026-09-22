@@ -65,6 +65,35 @@ describe("Hub RPC Handlers", () => {
 		expect(res.accounts.length).toBeGreaterThanOrEqual(5);
 	});
 
+	test("hub.getChannels returns channels for account or all accounts", async () => {
+		const { saveChannel } = await import("./db");
+		saveAccount({
+			id: "acc_wa",
+			provider: "whatsapp",
+			name: "WhatsApp",
+			status: "connected",
+			unreadCount: 0,
+			lastSyncAt: 1000,
+		});
+		saveChannel({
+			id: "wa-group-1",
+			accountId: "acc_wa",
+			remoteId: "group-1@g.us",
+			name: "Parents Support Group",
+			kind: "group",
+			unreadCount: 3,
+			lastMessageAt: 2000,
+		});
+
+		const handler = getRequiredHandler(WS_METHODS.hubGetChannels);
+		const resAll = (await handler({})) as { channels: { name: string }[] };
+		expect(resAll.channels.some((c) => c.name === "Parents Support Group")).toBe(true);
+
+		const resAcc = (await handler({ accountId: "acc_wa" })) as { channels: { name: string }[] };
+		expect(resAcc.channels.length).toBe(1);
+		expect(resAcc.channels[0]?.name).toBe("Parents Support Group");
+	});
+
 	test("hub.getMessages and hub.getDashboardSummary query persisted data", async () => {
 		saveAccount({
 			id: "acc_test",
