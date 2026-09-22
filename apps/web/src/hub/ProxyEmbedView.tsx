@@ -87,7 +87,7 @@ export function ProxyEmbedView({ tab }: { tab: string }) {
 		icon: RiTelegramLine,
 	};
 	const Icon = service.icon;
-	const proxyUrl = `/proxy/${tab}`;
+	const proxyUrl = tab === "discord" ? "/proxy/discord/channels/@me" : `/proxy/${tab}`;
 	const isDesktop = isDesktopRuntime();
 
 	const handleReload = () => {
@@ -109,6 +109,7 @@ export function ProxyEmbedView({ tab }: { tab: string }) {
 
 	const accounts = useAppStore((s) => s.hubAccounts);
 	const waAccount = accounts.find((a) => a.provider === "whatsapp");
+	const discordAccount = accounts.find((a) => a.provider === "discord");
 	const qrCodeDataUrl = waAccount?.metadata?.qrCodeDataUrl as string | undefined;
 	const channelViewMode = useAppStore((s) => s.hubViewPreference[tab] ?? "web");
 	const setChannelViewMode = (pref: "messages" | "web") => {
@@ -142,6 +143,15 @@ export function ProxyEmbedView({ tab }: { tab: string }) {
 						>
 							<RiShieldCheckLine className="size-12" />
 							Агент подключен
+						</span>
+					)}
+					{tab === "discord" && discordAccount?.status === "connected" && (
+						<span
+							data-testid="discord-agent-connected-badge"
+							className="inline-flex items-center gap-4 rounded-full bg-feedback-success-subtle px-8 py-2 tr-text-emphasis text-feedback-success"
+						>
+							<RiShieldCheckLine className="size-12" />
+							Подключен
 						</span>
 					)}
 					{tab === "whatsapp" && waAccount?.status !== "connected" && (
@@ -325,6 +335,30 @@ export function ProxyEmbedView({ tab }: { tab: string }) {
 							<button
 								type="button"
 								data-testid="whatsapp-open-window-btn"
+								onClick={handleOpenExternal}
+								className="shrink-0 rounded-[var(--radius-sm)] bg-control-primary-bg px-12 py-4 tr-text-action text-control-primary-text transition-colors hover:bg-control-primary-bg-hovered"
+							>
+								Открыть в окне
+							</button>
+						</div>
+					)}
+
+					{/* Browser-mode helper banner for Discord */}
+					{!isDesktop && tab === "discord" && (
+						<div
+							data-testid="discord-browser-banner"
+							className="flex items-center justify-between border-b border-border-default bg-container-header-bg px-16 py-8"
+						>
+							<div className="flex items-center gap-8 tr-text-metadata text-text-muted">
+								<RiInformationLine className="size-16 shrink-0 text-primary" />
+								<span>
+									Веб-клиент Discord открыт через локальный шлюз. Если авторизация в браузере
+									требует отдельного окна, используйте «Открыть в окне».
+								</span>
+							</div>
+							<button
+								type="button"
+								data-testid="discord-open-window-btn"
 								onClick={handleOpenExternal}
 								className="shrink-0 rounded-[var(--radius-sm)] bg-control-primary-bg px-12 py-4 tr-text-action text-control-primary-text transition-colors hover:bg-control-primary-bg-hovered"
 							>

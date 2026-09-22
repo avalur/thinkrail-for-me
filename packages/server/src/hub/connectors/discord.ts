@@ -272,9 +272,34 @@ export class DiscordConnector {
 		if (client) this.customClient = client;
 	}
 
+	private getBotToken(): string | undefined {
+		return this.config.botToken || process.env.DISCORD_BOT_TOKEN;
+	}
+
+	private getGuildId(): string | undefined {
+		return this.config.guildId || process.env.DISCORD_GUILD_ID;
+	}
+
+	private getWebhookUrl(): string | undefined {
+		return this.config.webhookUrl || process.env.DISCORD_WEBHOOK_URL;
+	}
+
+	private getChannelIds(): string[] | undefined {
+		if (this.config.channelIds && this.config.channelIds.length > 0) {
+			return this.config.channelIds;
+		}
+		const env = process.env.DISCORD_CHANNEL_IDS;
+		return env
+			? env
+					.split(",")
+					.map((s) => s.trim())
+					.filter(Boolean)
+			: undefined;
+	}
+
 	private getClient(): DiscordClientInterface {
 		if (this.customClient) return this.customClient;
-		return new HttpDiscordClient(this.config.botToken, this.config.apiBaseUrl);
+		return new HttpDiscordClient(this.getBotToken(), this.config.apiBaseUrl);
 	}
 
 	async sync(
@@ -283,18 +308,20 @@ export class DiscordConnector {
 	): Promise<{ syncedCount: number; unreadCount: number }> {
 		const db = database ?? getHubDb();
 		const client = this.getClient();
+		const guildId = this.getGuildId();
+		const channelIds = this.getChannelIds();
 
 		try {
 			// 1. Identify channels
 			let channels: DiscordChannel[] = [];
-			if (this.config.channelIds && this.config.channelIds.length > 0) {
-				channels = this.config.channelIds.map((cid) => ({
+			if (channelIds && channelIds.length > 0) {
+				channels = channelIds.map((cid) => ({
 					id: cid,
 					name: cid,
 					type: 0,
 				}));
-			} else if (this.config.guildId) {
-				const guildChannels = await client.getGuildChannels(this.config.guildId);
+			} else if (guildId) {
+				const guildChannels = await client.getGuildChannels(guildId);
 				// Filter for text (0) and announcement (5) channels
 				channels = guildChannels.filter((c) => c.type === 0 || c.type === 5);
 			}
@@ -424,8 +451,10 @@ export class DiscordConnector {
 			}
 
 			let remoteMessageId: string;
-			if (this.config.webhookUrl && !this.config.botToken && client.sendWebhookMessage) {
-				const res = await client.sendWebhookMessage(this.config.webhookUrl, params.body);
+			const webhookUrl = this.getWebhookUrl();
+			const botToken = this.getBotToken();
+			if (webhookUrl && !botToken && client.sendWebhookMessage) {
+				const res = await client.sendWebhookMessage(webhookUrl, params.body);
 				remoteMessageId = res.id;
 			} else {
 				const res = await client.sendMessage(targetChannel, params.body, params.replyToMessageId);
