@@ -250,4 +250,61 @@ describe("Hub RPC Handlers", () => {
 		expect(res.accountIds).toContain("acc_tg");
 		expect(publishedSyncStatuses.length).toBeGreaterThanOrEqual(2);
 	});
+
+	test("hub.saveAccountConfig persists config, triggers reload and returns account", async () => {
+		const saveAccountConfigHandler = getRequiredHandler(WS_METHODS.hubSaveAccountConfig);
+		const res = (await saveAccountConfigHandler({
+			accountId: "account_discord",
+			config: {
+				botToken: "test_bot_token_123",
+				guildId: "123456789",
+			},
+		})) as { success: boolean; account?: { id: string; provider: string } };
+
+		expect(res.success).toBe(true);
+		expect(res.account).toBeDefined();
+		expect(res.account?.id).toBe("account_discord");
+	});
+
+	test("hub.importDiscordPackage invokes package importer and validates params", async () => {
+		const importHandler = getRequiredHandler(WS_METHODS.hubImportDiscordPackage);
+		const errRes = (await importHandler({})) as { success: boolean; error?: string };
+		expect(errRes.success).toBe(false);
+		expect(errRes.error).toBeDefined();
+
+		const missingRes = (await importHandler({ packagePath: "/nonexistent/test.zip" })) as {
+			success: boolean;
+			error?: string;
+		};
+		expect(missingRes.success).toBe(false);
+		expect(missingRes.error).toContain("не найден");
+	});
+
+	test("hub.importTelegramExport invokes export importer and validates params", async () => {
+		const importHandler = getRequiredHandler(WS_METHODS.hubImportTelegramExport);
+		const errRes = (await importHandler({})) as { success: boolean; error?: string };
+		expect(errRes.success).toBe(false);
+		expect(errRes.error).toBeDefined();
+
+		const missingRes = (await importHandler({ exportPath: "/nonexistent/export.json" })) as {
+			success: boolean;
+			error?: string;
+		};
+		expect(missingRes.success).toBe(false);
+		expect(missingRes.error).toContain("не найден");
+	});
+
+	test("hub.submitTelegramPassword handles 2FA cloud password submission", async () => {
+		const submitPasswordHandler = getRequiredHandler(WS_METHODS.hubSubmitTelegramPassword);
+		const errRes = (await submitPasswordHandler({})) as { ok: boolean; error?: string };
+		expect(errRes.ok).toBe(false);
+		expect(errRes.error).toBeDefined();
+
+		const okRes = (await submitPasswordHandler({
+			accountId: "account_telegram",
+			password: "secret-cloud-password-123",
+		})) as { ok: boolean; status: string; waitingForScan?: boolean };
+		expect(okRes.ok).toBe(true);
+		expect(okRes.status).toBeDefined();
+	});
 });

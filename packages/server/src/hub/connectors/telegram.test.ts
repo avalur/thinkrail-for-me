@@ -172,4 +172,38 @@ describe("Telegram Connector", () => {
 		expect(saved?.body).toBe("Reviewed and approved!");
 		expect(saved?.isRead).toBe(true);
 	});
+
+	it("initializes GramJsTelegramClient and handles start/stop lifecycle cleanly", async () => {
+		const mtprotoConfig: TelegramAccountConfig = {
+			id: "tg-account-mtproto",
+			provider: "telegram",
+			name: "Alex Telegram",
+			enabled: true,
+			authDir: "/tmp/non-existent-auth-dir-test",
+		};
+
+		const connector = new TelegramConnector(mtprotoConfig);
+		expect(connector.isConnectedStatus()).toBe(false);
+
+		// Stop is safe even if not connected
+		await connector.stop();
+		expect(connector.isConnectedStatus()).toBe(false);
+	});
+
+	it("supports submitting 2FA cloud password to GramJsTelegramClient", async () => {
+		const mtprotoConfig: TelegramAccountConfig = {
+			id: "tg-account-2fa",
+			provider: "telegram",
+			name: "Alex Telegram 2FA",
+			enabled: true,
+			authDir: "/tmp/non-existent-auth-dir-test-2fa",
+		};
+
+		const connector = new TelegramConnector(mtprotoConfig);
+		const handled = connector.submitPassword("my-cloud-password");
+		// Returns false when not actively waiting in a resolver promise, but saves password
+		expect(handled).toBe(false);
+
+		await connector.stop();
+	});
 });

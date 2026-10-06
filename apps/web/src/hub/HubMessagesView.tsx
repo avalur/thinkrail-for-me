@@ -499,19 +499,68 @@ export function HubMessagesView({
 
 						{/* Message List */}
 						<div data-testid="hub-messages-list" className="flex-1 overflow-y-auto p-16 space-y-12">
-							{messages.length === 0 && !loading && (
-								<div className="flex h-full flex-col items-center justify-center gap-12 text-center text-text-muted">
-									<RiMailLine className="size-36 opacity-40" />
-									<div>
-										<div className="tr-title-compact text-text-default">Сообщений нет</div>
-										<div className="mt-4 tr-text-metadata">
-											{unreadOnly
-												? "Нет непрочитанных сообщений по выбранному фильтру."
-												: "Сообщения не найдены или база пуста."}
+							{messages.length === 0 &&
+								!loading &&
+								(selectedProvider === "discord" &&
+								accounts.find((a) => a.provider === "discord")?.status !== "connected" ? (
+									<div className="flex h-full flex-col items-center justify-center gap-12 text-center text-text-muted p-24">
+										<RiDiscordLine className="size-40 text-primary opacity-60" />
+										<div>
+											<div className="tr-title-compact text-text-default">
+												Discord не подключен к базе данных
+											</div>
+											<div className="mt-4 tr-text-metadata max-w-md">
+												Для чтения каналов, сообщений и поиска ассистентом укажите токен Discord.
+											</div>
+										</div>
+										<button
+											type="button"
+											onClick={() => {
+												useAppStore.getState().setHubActiveTab("discord");
+												useAppStore.getState().setHubViewPreference("discord", "web");
+											}}
+											className="rounded-[var(--radius-sm)] bg-control-primary-bg px-16 py-8 tr-text-action text-control-primary-text hover:bg-control-primary-bg-hovered transition-colors"
+										>
+											Настроить токен Discord
+										</button>
+									</div>
+								) : selectedProvider === "telegram" &&
+									accounts.find((a) => a.provider === "telegram")?.status !== "connected" ? (
+									<div className="flex h-full flex-col items-center justify-center gap-12 text-center text-text-muted p-24">
+										<RiTelegramLine className="size-40 text-primary opacity-60" />
+										<div>
+											<div className="tr-title-compact text-text-default">
+												Telegram не подключен к базе данных
+											</div>
+											<div className="mt-4 tr-text-metadata max-w-md">
+												Для синхронизации диалогов и сообщений отсканируйте QR-код в панели Telegram
+												или импортируйте экспорт.
+											</div>
+										</div>
+										<button
+											type="button"
+											onClick={() => {
+												useAppStore.getState().setHubActiveTab("telegram");
+												useAppStore.getState().setHubViewPreference("telegram", "web");
+											}}
+											className="rounded-[var(--radius-sm)] bg-control-primary-bg px-16 py-8 tr-text-action text-control-primary-text hover:bg-control-primary-bg-hovered transition-colors"
+										>
+											Подключить Telegram (QR / Настройки)
+										</button>
+									</div>
+								) : (
+									<div className="flex h-full flex-col items-center justify-center gap-12 text-center text-text-muted">
+										<RiMailLine className="size-36 opacity-40" />
+										<div>
+											<div className="tr-title-compact text-text-default">Сообщений нет</div>
+											<div className="mt-4 tr-text-metadata">
+												{unreadOnly
+													? "Нет непрочитанных сообщений по выбранному фильтру."
+													: "Сообщения не найдены или база пуста."}
+											</div>
 										</div>
 									</div>
-								</div>
-							)}
+								))}
 
 							{messages.map((m) => {
 								const isMe = m.senderName === "Me" || m.metadata?.fromMe;

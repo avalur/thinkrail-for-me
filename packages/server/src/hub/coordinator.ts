@@ -29,6 +29,7 @@ import {
 } from "./connectors/slack";
 import {
 	registerTelegramAccount,
+	submitTelegramPassword,
 	type TelegramClientInterface,
 	type TelegramConnector,
 } from "./connectors/telegram";
@@ -96,17 +97,19 @@ class HubSyncCoordinator {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
 		}
-		for (const id of this.telegramConnectors.keys()) {
+		for (const [id, conn] of this.telegramConnectors.entries()) {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
+			void conn.stop();
 		}
 		for (const id of this.slackConnectors.keys()) {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
 		}
-		for (const id of this.discordConnectors.keys()) {
+		for (const [id, conn] of this.discordConnectors.entries()) {
 			unregisterHubAccountSyncer(id);
 			unregisterHubMessageSender(id);
+			conn.stop();
 		}
 		for (const [id, conn] of this.whatsappConnectors.entries()) {
 			unregisterHubAccountSyncer(id);
@@ -178,6 +181,44 @@ class HubSyncCoordinator {
 		}, intervalMs);
 
 		this.accountTimers.set(accountId, timer);
+	}
+
+	reloadAccount(accountId: string): void {
+		const existingTimer = this.accountTimers.get(accountId);
+		if (existingTimer) {
+			clearInterval(existingTimer);
+			this.accountTimers.delete(accountId);
+		}
+
+		unregisterHubAccountSyncer(accountId);
+		unregisterHubMessageSender(accountId);
+		this.emailConnectors.delete(accountId);
+		const tgConn = this.telegramConnectors.get(accountId);
+		if (tgConn) {
+			void tgConn.stop();
+			this.telegramConnectors.delete(accountId);
+		}
+		this.slackConnectors.delete(accountId);
+		const discordConn = this.discordConnectors.get(accountId);
+		if (discordConn) {
+			discordConn.stop();
+			this.discordConnectors.delete(accountId);
+		}
+		const waConn = this.whatsappConnectors.get(accountId);
+		if (waConn) {
+			void waConn.stop();
+			this.whatsappConnectors.delete(accountId);
+		}
+
+		const configFile = loadHubAccountConfigs();
+		const acc = configFile.accounts.find((a) => a.id === accountId);
+		if (acc && acc.enabled !== false) {
+			this.registerConnector(acc);
+			const interval =
+				("pollIntervalMs" in acc && acc.pollIntervalMs ? acc.pollIntervalMs : acc.syncIntervalMs) ??
+				DEFAULT_POLL_INTERVAL_MS;
+			this.scheduleAccountPolling(acc.id, interval);
+		}
 	}
 
 	async syncAccount(accountId: string, force = false): Promise<boolean> {
@@ -273,6 +314,14 @@ class HubSyncCoordinator {
 			};
 		}
 	}
+
+	submitTelegramPassword(accountId: string, password: string): boolean {
+		const tgConn = this.telegramConnectors.get(accountId);
+		if (tgConn) {
+			return tgConn.submitPassword(password);
+		}
+		return submitTelegramPassword(accountId, password);
+	}
 }
 
 export const coordinator = new HubSyncCoordinator();
@@ -297,4 +346,12 @@ export function triggerCoordinatorSync(
 	force?: boolean,
 ): Promise<HubSyncNowResult> {
 	return coordinator.triggerSync(accountId, force);
+}
+
+export function reloadCoordinatorAccount(accountId: string): void {
+	coordinator.reloadAccount(accountId);
+}
+
+export function submitCoordinatorTelegramPassword(accountId: string, password: string): boolean {
+	return coordinator.submitTelegramPassword(accountId, password);
 }

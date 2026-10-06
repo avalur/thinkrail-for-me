@@ -7,10 +7,19 @@ import {
 	type HubMessage,
 	type HubSendMessageParams,
 	type HubSendMessageResult,
+	type HubSubmitTelegramPasswordParams,
 	type HubSyncNowParams,
 	type HubSyncNowResult,
 	WS_METHODS,
 } from "@thinkrail/contracts";
+import {
+	getAccountConfig,
+	type HubAccountConfig,
+	saveAccountConfig,
+	syncAccountsFromConfigToDb,
+	type TelegramAccountConfig,
+} from "./accounts";
+import { reloadCoordinatorAccount, submitCoordinatorTelegramPassword } from "./coordinator";
 import {
 	getAccount,
 	getAccounts,
@@ -21,7 +30,9 @@ import {
 	saveMessage,
 	seedDefaultAccountsIfEmpty,
 } from "./db";
+import { importDiscordPackage } from "./discordPackageImporter";
 import { publishHubAccountStatus, publishHubMessage, publishHubSyncStatus } from "./publishers";
+import { importTelegramExport } from "./telegramExportImporter";
 
 export type HubMessageSender = (params: HubSendMessageParams) => Promise<HubSendMessageResult>;
 export type HubAccountSyncer = (params: HubSyncNowParams) => Promise<HubSyncNowResult>;
@@ -170,6 +181,8 @@ export const hubHandlers: Record<
 					await customSyncer({
 						accountId: acc.id,
 						...(p.force !== undefined ? { force: p.force } : {}),
+						...(p.backfill !== undefined ? { backfill: p.backfill } : {}),
+						...(p.backfillLimit !== undefined ? { backfillLimit: p.backfillLimit } : {}),
 					});
 				}
 			}
@@ -196,5 +209,109 @@ export const hubHandlers: Record<
 				error,
 			};
 		}
+	},
+
+	[WS_METHODS.hubSaveAccountConfig]: async (params) => {
+		const p = (params ?? {}) as { accountId?: string; config?: Record<string, unknown> };
+		if (!p.accountId || !p.config) {
+			return { success: false, error: "Missing accountId or config" };
+		}
+		const existingConfig = getAccountConfig(p.accountId);
+		if (!existingConfig) {
+			return { success: false, error: `Account not found: ${p.accountId}` };
+		}
+		const updatedConfig: HubAccountConfig = {
+			...existingConfig,
+			...p.config,
+			id: p.accountId,
+			provider: existingConfig.provider,
+		} as HubAccountConfig;
+
+		saveAccountConfig(updatedConfig);
+		syncAccountsFromConfigToDb();
+		reloadCoordinatorAccount(p.accountId);
+
+		// If a 2FA/cloud password was provided, forward it directly to the connector
+		const submittedPassword = p.config.twoFactorPassword ?? p.config.password;
+		if (submittedPassword && typeof submittedPassword === "string") {
+			submitCoordinatorTelegramPassword(p.accountId, submittedPassword);
+		}
+
+		// Trigger immediate sync
+		const customSyncer =
+			hubAccountSyncers.get(p.accountId) ?? hubAccountSyncers.get(existingConfig.provider);
+		if (customSyncer) {
+			void customSyncer({ accountId: p.accountId, force: true });
+		}
+
+		const updatedAccount = getAccount(p.accountId);
+		return {
+			success: true,
+			account: updatedAccount ?? undefined,
+		};
+	},
+
+	[WS_METHODS.hubSubmitTelegramPassword]: async (params) => {
+		const p = (params ?? {}) as HubSubmitTelegramPasswordParams;
+		if (!p.password) {
+			return { ok: false, status: "error", error: "Не указан пароль" };
+		}
+		const accountId = p.accountId ?? "account_telegram";
+
+		const handled = submitCoordinatorTelegramPassword(accountId, p.password);
+
+		// Also persist password to account config so reconnects remember it
+		const existingConfig = getAccountConfig(accountId);
+		if (existingConfig && existingConfig.provider === "telegram") {
+			const tgConfig = existingConfig as TelegramAccountConfig;
+			saveAccountConfig({
+				...tgConfig,
+				twoFactorPassword: p.password,
+				password: p.password,
+				mtproto: {
+					...(tgConfig.mtproto || {}),
+					twoFactorPassword: p.password,
+					password: p.password,
+				},
+			});
+		}
+
+		return {
+			ok: true,
+			status: handled ? "password_submitted" : "saved_for_next_scan",
+			waitingForScan: !handled,
+		};
+	},
+
+	[WS_METHODS.hubImportDiscordPackage]: async (params) => {
+		const p = (params ?? {}) as { packagePath?: string; accountId?: string };
+		if (!p.packagePath) {
+			return {
+				success: false,
+				importedChannels: 0,
+				importedMessages: 0,
+				error: "Не указан путь packagePath",
+			};
+		}
+		return importDiscordPackage({
+			packagePath: p.packagePath,
+			accountId: p.accountId ?? "account_discord",
+		});
+	},
+
+	[WS_METHODS.hubImportTelegramExport]: async (params) => {
+		const p = (params ?? {}) as { exportPath?: string; accountId?: string };
+		if (!p.exportPath) {
+			return {
+				success: false,
+				importedChannels: 0,
+				importedMessages: 0,
+				error: "Не указан путь exportPath",
+			};
+		}
+		return importTelegramExport({
+			exportPath: p.exportPath,
+			accountId: p.accountId ?? "account_telegram",
+		});
 	},
 };

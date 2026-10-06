@@ -184,11 +184,59 @@ export interface HubMarkReadParams {
 export interface HubSyncNowParams {
 	accountId?: string;
 	force?: boolean;
+	backfill?: boolean;
+	backfillLimit?: number;
+}
+
+export interface HubSubmitTelegramPasswordParams {
+	accountId?: string;
+	password: string;
+}
+
+export interface HubSubmitTelegramPasswordResult {
+	ok: true;
+	status: string;
+	waitingForScan?: boolean;
 }
 
 export interface HubSyncNowResult {
 	synced: boolean;
 	accountIds?: string[];
+	error?: string;
+}
+
+export interface HubImportDiscordPackageParams {
+	packagePath: string;
+	accountId?: string;
+}
+
+export interface HubImportDiscordPackageResult {
+	success: boolean;
+	importedChannels: number;
+	importedMessages: number;
+	error?: string;
+}
+
+export interface HubImportTelegramExportParams {
+	exportPath: string;
+	accountId?: string;
+}
+
+export interface HubImportTelegramExportResult {
+	success: boolean;
+	importedChannels: number;
+	importedMessages: number;
+	error?: string;
+}
+
+export interface HubSaveAccountConfigParams {
+	accountId: string;
+	config: Record<string, unknown>;
+}
+
+export interface HubSaveAccountConfigResult {
+	success: boolean;
+	account?: HubAccount;
 	error?: string;
 }
 

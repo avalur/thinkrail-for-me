@@ -267,7 +267,7 @@ describe("Central Viewport Switching", () => {
 		expect(html).toContain('data-testid="proxy-ask-agent-btn"');
 		expect(html).toContain('data-testid="proxy-reload-btn"');
 		expect(html).toContain('data-testid="proxy-external-btn"');
-		expect(html).toContain('src="/proxy/telegram"');
+		expect(html).toContain('src="/proxy/telegram/k/"');
 	});
 
 	test("renders ProxyEmbedView for work email", () => {
@@ -278,12 +278,80 @@ describe("Central Viewport Switching", () => {
 	});
 
 	test("renders ProxyEmbedView for WhatsApp with helper banner in browser mode", () => {
-		useAppStore.setState({ hubActiveTab: "whatsapp" });
+		useAppStore.setState({
+			hubActiveTab: "whatsapp",
+			hubViewPreference: { whatsapp: "web" },
+		});
 		const html = renderToStaticMarkup(<PersonalHubView />);
 		expect(html).toContain("WhatsApp Web");
 		expect(html).toContain('data-testid="whatsapp-browser-banner"');
 		expect(html).toContain('data-testid="whatsapp-open-window-btn"');
 		expect(html).toContain('src="/proxy/whatsapp"');
+	});
+
+	test("renders ProxyEmbedView for Telegram with QR banner when unlinked", () => {
+		useAppStore.setState({
+			hubActiveTab: "telegram",
+			hubAccounts: [
+				{
+					id: "account_telegram",
+					provider: "telegram",
+					name: "Telegram",
+					status: "connecting",
+					unreadCount: 0,
+					lastSyncAt: null,
+					metadata: {
+						qrCodeDataUrl: "data:image/png;base64,fakeTelegramQr",
+					},
+				},
+			],
+		});
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain("Telegram Web");
+		expect(html).toContain('data-testid="telegram-qr-banner"');
+		expect(html).toContain('alt="Telegram QR Code"');
+		expect(html).toContain('data-testid="telegram-agent-connecting-badge"');
+		expect(html).toContain('src="/proxy/telegram/k/"');
+	});
+
+	test("renders ProxyEmbedView for Telegram with 2FA password prompt when needs2fa is true", () => {
+		useAppStore.setState({
+			hubActiveTab: "telegram",
+			hubAccounts: [
+				{
+					id: "account_telegram",
+					provider: "telegram",
+					name: "Telegram",
+					status: "connecting",
+					unreadCount: 0,
+					lastSyncAt: null,
+					metadata: {
+						qrCodeDataUrl: "data:image/png;base64,fakeTelegramQr",
+						needs2fa: true,
+						passwordHint: "my-test-hint",
+					},
+				},
+			],
+		});
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain('data-testid="telegram-2fa-container"');
+		expect(html).toContain('data-testid="telegram-2fa-input"');
+		expect(html).toContain('data-testid="telegram-2fa-submit-btn"');
+		expect(html).toContain("my-test-hint");
+		expect(html).toContain("Требуется 2FA пароль");
+	});
+
+	test("renders DiscordHubPanel with external button and database sync form in browser mode", () => {
+		useAppStore.setState({
+			hubActiveTab: "discord",
+			hubViewPreference: { discord: "web" },
+		});
+		const html = renderToStaticMarkup(<PersonalHubView />);
+		expect(html).toContain('data-testid="discord-hub-panel"');
+		expect(html).toContain('data-testid="discord-open-external-btn"');
+		expect(html).toContain('data-testid="discord-view-db-messages-btn"');
+		expect(html).toContain("Discord Bot (Автоматический сбор)");
+		expect(html).toContain("Импорт Data Package (Архив аккаунта)");
 	});
 
 	test("renders HubMessagesView when activeTab is messages", () => {
@@ -303,6 +371,9 @@ describe("Central Viewport Switching", () => {
 	});
 
 	test("renders native electrobun-webview when running in desktop mode", () => {
+		useAppStore.setState({
+			hubViewPreference: { whatsapp: "web" },
+		});
 		const g = globalThis as unknown as Record<string, unknown>;
 		const prevId = g.__electrobunWebviewId;
 		try {

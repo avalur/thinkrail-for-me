@@ -24,7 +24,7 @@ describe("Hub Reverse-Proxy Gateway", () => {
 			fetch(req) {
 				const url = new URL(req.url);
 
-				if (url.pathname === "/gzip-html") {
+				if (url.pathname === "/gzip-html" || url.pathname === "/k/") {
 					return new Response(testHtmlGzip, {
 						status: 200,
 						headers: {
@@ -283,6 +283,33 @@ describe("Hub Reverse-Proxy Gateway", () => {
 			const text = await res.text();
 			expect(text).toContain(`<base href="${target}">`);
 			expect(text).toContain("<div>No head tag</div>");
+		});
+
+		test("redirects /proxy/telegram and /proxy/telegram/ to /proxy/telegram/k/", async () => {
+			const req1 = new Request("http://localhost:24242/proxy/telegram");
+			const res1 = await handleProxyRequest(req1);
+			expect(res1.status).toBe(307);
+			expect(res1.headers.get("Location")).toBe("/proxy/telegram/k/");
+
+			const req2 = new Request("http://localhost:24242/proxy/telegram/?source=nav");
+			const res2 = await handleProxyRequest(req2);
+			expect(res2.status).toBe(307);
+			expect(res2.headers.get("Location")).toBe("/proxy/telegram/k/?source=nav");
+		});
+
+		test("injects relative client base tag for service presets", async () => {
+			setCustomTargetResolver((key) => {
+				if (key === "telegram") return `${mockServerUrl}/gzip-html`;
+				return undefined;
+			});
+
+			const req = new Request("http://localhost:24242/proxy/telegram/k/");
+			const res = await handleProxyRequest(req);
+			expect(res.status).toBe(200);
+			const text = await res.text();
+			expect(text).toContain('<base href="/proxy/telegram/k/">');
+
+			setCustomTargetResolver(null);
 		});
 	});
 });

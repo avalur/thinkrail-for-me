@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { HubAccount, HubAccountProvider } from "@thinkrail/contracts";
 import { logger } from "../log";
 import { dataDir } from "../persistence";
-import { getAccounts, getHubDb, saveAccount } from "./db";
+import { getAccount, getAccounts, getHubDb, saveAccount } from "./db";
 
 const log = logger("hub:accounts");
 
@@ -51,12 +51,18 @@ export interface TelegramMtprotoConfig {
 	apiHash?: string;
 	sessionString?: string;
 	phone?: string;
+	password?: string;
+	twoFactorPassword?: string;
 }
 
 export interface TelegramAccountConfig extends BaseAccountConfig {
 	provider: "telegram";
 	bot?: TelegramBotConfig;
+	botToken?: string;
 	mtproto?: TelegramMtprotoConfig;
+	twoFactorPassword?: string;
+	password?: string;
+	authDir?: string;
 	pollIntervalMs?: number;
 }
 
@@ -72,6 +78,7 @@ export interface SlackAccountConfig extends BaseAccountConfig {
 export interface DiscordAccountConfig extends BaseAccountConfig {
 	provider: "discord";
 	botToken?: string;
+	userToken?: string;
 	webhookUrl?: string;
 	guildId?: string;
 	channelIds?: string[];
@@ -245,15 +252,59 @@ export function syncAccountsFromConfigToDb(database?: Database): HubAccount[] {
 
 	for (const acc of config.accounts) {
 		const email = "email" in acc ? (acc.email as string | undefined) : undefined;
+		let initialStatus: HubAccount["status"] = "disconnected";
+		let initialError: string | undefined;
+
+		if (acc.enabled === false) {
+			initialStatus = "disconnected";
+		} else if (acc.provider === "whatsapp") {
+			const existing = getAccount(acc.id, db);
+			initialStatus = existing?.status ?? "connecting";
+		} else if (acc.provider === "discord") {
+			const dAcc = acc as DiscordAccountConfig;
+			const hasCreds =
+				Boolean(dAcc.botToken) ||
+				Boolean(dAcc.userToken) ||
+				Boolean(process.env.DISCORD_BOT_TOKEN) ||
+				Boolean(process.env.DISCORD_USER_TOKEN);
+			if (hasCreds) {
+				const existing = getAccount(acc.id, db);
+				initialStatus = existing?.status ?? "connecting";
+			} else {
+				initialStatus = "disconnected";
+				initialError = "Требуется токен Discord (Bot Token или User Token)";
+			}
+		} else if (acc.provider === "telegram") {
+			const tAcc = acc as TelegramAccountConfig;
+			const hasCreds = Boolean(tAcc.bot?.botToken) || Boolean(tAcc.mtproto?.phone);
+			if (hasCreds) {
+				const existing = getAccount(acc.id, db);
+				initialStatus = existing?.status ?? "connecting";
+			} else {
+				initialStatus = "disconnected";
+				initialError = "Требуется токен Telegram";
+			}
+		} else {
+			const existing = getAccount(acc.id, db);
+			initialStatus = existing?.status ?? "connected";
+		}
+
+		const existing = getAccount(acc.id, db);
 		saveAccount(
 			{
 				id: acc.id,
 				provider: acc.provider,
 				name: acc.name,
 				...(email ? { email } : {}),
-				status: acc.enabled === false ? "disconnected" : "connected",
-				unreadCount: 0,
-				lastSyncAt: null,
+				status: initialStatus,
+				unreadCount: existing?.unreadCount ?? 0,
+				lastSyncAt: existing?.lastSyncAt ?? null,
+				...(existing?.metadata ? { metadata: existing.metadata } : {}),
+				...(initialError
+					? { error: initialError }
+					: existing?.error
+						? { error: existing.error }
+						: {}),
 			},
 			db,
 		);

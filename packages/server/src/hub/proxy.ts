@@ -202,6 +202,20 @@ export async function handleProxyRequest(req: Request): Promise<Response> {
 
 	const { targetUrl, servicePrefix } = resolution;
 
+	// Redirect root /proxy/telegram and /proxy/telegram/ to modern Telegram Web K (/proxy/telegram/k/)
+	if (
+		servicePrefix === "telegram" &&
+		(reqUrl.pathname === "/proxy/telegram" || reqUrl.pathname === "/proxy/telegram/")
+	) {
+		return new Response(null, {
+			status: 307,
+			headers: {
+				Location: `/proxy/telegram/k/${reqUrl.search}`,
+				"Access-Control-Allow-Origin": req.headers.get("origin") ?? "*",
+			},
+		});
+	}
+
 	// Build upstream headers
 	const forwardHeaders = new Headers();
 	for (const [key, value] of req.headers.entries()) {
@@ -310,13 +324,19 @@ export async function handleProxyRequest(req: Request): Promise<Response> {
 	if (contentType.toLowerCase().includes("text/html")) {
 		try {
 			let text = await upstreamResponse.text();
-			if (!/<base\s/i.test(text)) {
-				const baseTag = `<base href="${targetUrl.href}">`;
-				if (/<head[^>]*>/i.test(text)) {
-					text = text.replace(/(<head[^>]*>)/i, `$1\n  ${baseTag}`);
-				} else {
-					text = `${baseTag}\n${text}`;
-				}
+			const clientBasePath = servicePrefix
+				? reqUrl.pathname.endsWith("/")
+					? reqUrl.pathname
+					: `${reqUrl.pathname}/`
+				: targetUrl.href;
+			const baseHref = clientBasePath.startsWith("/") ? clientBasePath : targetUrl.href;
+			const baseTag = `<base href="${baseHref}">`;
+			if (/<base\s[^>]*>/i.test(text)) {
+				text = text.replace(/<base\s[^>]*>/i, baseTag);
+			} else if (/<head[^>]*>/i.test(text)) {
+				text = text.replace(/(<head[^>]*>)/i, `$1\n  ${baseTag}`);
+			} else {
+				text = `${baseTag}\n${text}`;
 			}
 			// Delete Content-Length since body length might have changed
 			responseHeaders.delete("content-length");

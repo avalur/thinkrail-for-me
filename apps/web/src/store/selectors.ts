@@ -604,5 +604,7 @@ export function selectHubViewPreference(
 	state: { hubViewPreference: Record<string, "messages" | "web"> },
 	tab: string,
 ): "messages" | "web" {
-	return state.hubViewPreference[tab] ?? (tab === "whatsapp" ? "messages" : "web");
+	return (
+		state.hubViewPreference[tab] ?? (tab === "whatsapp" || tab === "discord" ? "messages" : "web")
+	);
 }

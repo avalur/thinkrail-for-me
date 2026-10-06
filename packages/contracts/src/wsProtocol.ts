@@ -50,10 +50,18 @@ import type {
 	HubChannel,
 	HubDashboardSummary,
 	HubFilter,
+	HubImportDiscordPackageParams,
+	HubImportDiscordPackageResult,
+	HubImportTelegramExportParams,
+	HubImportTelegramExportResult,
 	HubMarkReadParams,
 	HubMessage,
+	HubSaveAccountConfigParams,
+	HubSaveAccountConfigResult,
 	HubSendMessageParams,
 	HubSendMessageResult,
+	HubSubmitTelegramPasswordParams,
+	HubSubmitTelegramPasswordResult,
 	HubSyncNowParams,
 	HubSyncNowResult,
 } from "./hubDomain";
@@ -283,6 +291,10 @@ export const WS_METHODS = {
 	hubMarkRead: "hub.markRead",
 	hubSendMessage: "hub.sendMessage",
 	hubSyncNow: "hub.syncNow",
+	hubSaveAccountConfig: "hub.saveAccountConfig",
+	hubSubmitTelegramPassword: "hub.submitTelegramPassword",
+	hubImportDiscordPackage: "hub.importDiscordPackage",
+	hubImportTelegramExport: "hub.importTelegramExport",
 } as const;
 
 export const WS_CHANNELS = {
@@ -685,6 +697,22 @@ export interface WsMethodMap {
 	"hub.syncNow": {
 		params: HubSyncNowParams;
 		result: HubSyncNowResult;
+	};
+	"hub.saveAccountConfig": {
+		params: HubSaveAccountConfigParams;
+		result: HubSaveAccountConfigResult;
+	};
+	"hub.submitTelegramPassword": {
+		params: HubSubmitTelegramPasswordParams;
+		result: HubSubmitTelegramPasswordResult;
+	};
+	"hub.importDiscordPackage": {
+		params: HubImportDiscordPackageParams;
+		result: HubImportDiscordPackageResult;
+	};
+	"hub.importTelegramExport": {
+		params: HubImportTelegramExportParams;
+		result: HubImportTelegramExportResult;
 	};
 }
 

@@ -86,6 +86,10 @@ test("hub features advance the protocol and name channels and methods", () => {
 	expect(WS_METHODS.hubMarkRead).toBe("hub.markRead");
 	expect(WS_METHODS.hubSendMessage).toBe("hub.sendMessage");
 	expect(WS_METHODS.hubSyncNow).toBe("hub.syncNow");
+	expect(WS_METHODS.hubSaveAccountConfig).toBe("hub.saveAccountConfig");
+	expect(WS_METHODS.hubSubmitTelegramPassword).toBe("hub.submitTelegramPassword");
+	expect(WS_METHODS.hubImportDiscordPackage).toBe("hub.importDiscordPackage");
+	expect(WS_METHODS.hubImportTelegramExport).toBe("hub.importTelegramExport");
 	expect(WS_CHANNELS.hubMessageReceived).toBe("hub.messageReceived");
 	expect(WS_CHANNELS.hubAccountStatusChanged).toBe("hub.accountStatusChanged");
 	expect(WS_CHANNELS.hubSyncStatus).toBe("hub.syncStatus");

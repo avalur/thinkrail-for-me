@@ -184,4 +184,38 @@ describe("Discord Connector", () => {
 		expect(saved?.body).toBe("Thanks for the heads up, looking into it now.");
 		expect(saved?.isRead).toBe(true);
 	});
+
+	it("supports deep history backfill across channels", async () => {
+		const channels: DiscordChannel[] = [
+			{ id: "CH_HISTORY", name: "history", type: 0, guild_id: "G_123456" },
+		];
+		const messages: DiscordMessage[] = [
+			{
+				id: "100000000000000021",
+				channel_id: "CH_HISTORY",
+				author: { id: "U_1", username: "user1" },
+				content: "Historical message 1",
+				timestamp: "2026-01-01T10:00:00.000Z",
+			},
+			{
+				id: "100000000000000022",
+				channel_id: "CH_HISTORY",
+				author: { id: "U_2", username: "user2" },
+				content: "Historical message 2",
+				timestamp: "2026-01-02T10:00:00.000Z",
+			},
+		];
+
+		const mockClient = new MockDiscordClient(channels, messages);
+		const connector = new DiscordConnector(testConfig, mockClient);
+
+		const res = await connector.sync({ backfill: true, backfillLimit: 50 }, db);
+		expect(res.syncedCount).toBe(2);
+		expect(res.unreadCount).toBe(2);
+
+		const { total } = getMessages({ accountId: testConfig.id }, db);
+		expect(total).toBe(2);
+
+		connector.stop();
+	});
 });
