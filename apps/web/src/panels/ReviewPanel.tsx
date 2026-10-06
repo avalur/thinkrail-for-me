@@ -28,6 +28,7 @@ import {
 	commentSurface,
 	fileSummaries,
 	lineRef,
+	outdatedReason,
 	type ReviewFileSummary,
 	type ReviewSurface,
 	reviewFileSurface,
@@ -52,7 +53,10 @@ export function ReviewPanel({ workspaceId, failed }: { workspaceId: string; fail
 			setExpanded(new Set(expanded).add(activeReviewedPath));
 	}
 
-	const openChat = (sessionId: string) => openChatInTab(workspaceId, sessionId);
+	const openChat = (sessionId: string) => {
+		useAppStore.getState().noteDirectChatActivation(sessionId);
+		return openChatInTab(workspaceId, sessionId);
+	};
 
 	const openSurface = (path: string, surface: ReviewSurface) => {
 		if (surface.kind === "file") {
@@ -403,15 +407,7 @@ function CommentRow({
 							</span>
 						)}
 						{ref && <span className="tr-code-text text-text-subtle">{ref}</span>}
-						{comment.reflection?.verdict === "refuted" ? (
-							<span
-								data-testid="review-comment-refuted"
-								title={`An independent reflector judged this finding refuted: ${comment.reflection.reason} — it was held back from the auto-fix cycle.`}
-								className="tr-text-eyebrow text-text-subtle"
-							>
-								refuted by reflection
-							</span>
-						) : comment.stale ? (
+						{comment.stale ? (
 							<span
 								data-testid="review-comment-stale"
 								title="The code this finding was filed against was rewritten after review — it won't ride the auto-fix cycle"
@@ -421,7 +417,12 @@ function CommentRow({
 							</span>
 						) : (
 							comment.anchorState === "outdated" && (
-								<span className="tr-text-eyebrow text-text-subtle">outdated</span>
+								<span
+									className="tr-text-eyebrow text-text-subtle"
+									title={outdatedReason(comment.anchor)}
+								>
+									outdated
+								</span>
 							)
 						)}
 					</span>

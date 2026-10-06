@@ -5,7 +5,7 @@ status: active
 title: Web UI client
 parent: architecture
 depends-on: [module-contracts]
-tags: [v1, ui]
+tags: [ui]
 ---
 
 ## Responsibility
@@ -26,7 +26,7 @@ event stream as a chat-centric, multi-session IDE shell.
 
 ## Internal modules
 
-Each is a bounded sub-module; `navigation`/`transport`/`store`/`updates`/`prompt`/`lib` expose an `index.ts` **barrel** (their only public
+Each is a bounded sub-module; `navigation`/`transport`/`store`/`updates`/`prompt`/`resources`/`lib` expose an `index.ts` **barrel** (their only public
 surface). `panels`/`components/ui`/`chat` are imported **per-file by design** — barreling them would pull
 the lazily-loaded Monaco/shiki/xterm chunks into the eager bundle and break the shadcn per-primitive
 convention; their boundary is held by convention + spec. Sibling edges live here, not in the leaves.
@@ -37,12 +37,13 @@ convention; their boundary is held by convention + spec. Sibling edges live here
 | `transport` | the WS client + its singleton/store wiring | yes | [transport/SPEC.md](src/transport/SPEC.md) |
 | `store` | Zustand: domain projections, one local workbench frame, per-workspace views/attention, chat runtimes | yes | [store/SPEC.md](src/store/SPEC.md) |
 | `panels` | layout-agnostic, store-driven feature views | no | [panels/SPEC.md](src/panels/SPEC.md) |
+| `resources` | resource descriptors, renderer resolution, and renderer-agnostic review surface types | yes | [resources/SPEC.md](src/resources/SPEC.md) |
 | `chat` | pi conversation UI primitives: content-block renderers + the tool-renderer registry | no | [chat/SPEC.md](src/chat/SPEC.md) |
 | `prompt` | lifecycle-neutral slash completion + prompt-template slot editing | yes | [prompt/SPEC.md](src/prompt/SPEC.md) |
 | `auth` | in-app provider login: the presentational OAuth dialog + its client-side state reducer | yes | [auth/SPEC.md](src/auth/SPEC.md) |
 | `shell` | responsive composition + frontend-local workbench ownership (bounded `layout/` and `layoutState/` children) | no | [shell/SPEC.md](src/shell/SPEC.md) |
 | `updates` | optional native/host update shell hook and props-driven controls | yes | [updates/SPEC.md](src/updates/SPEC.md) |
-| `components` | dependency-light shared React primitives: error isolation, custom icons, quiet scroll frames (contains `ui/`) | no | [components/SPEC.md](src/components/SPEC.md) |
+| `components` | dependency-light shared React primitives: error isolation, status icons, custom icons, quiet scroll frames (contains `ui/`) | no | [components/SPEC.md](src/components/SPEC.md) |
 | `components/ui` | shadcn primitives, themed with our tokens | no | [components/ui/SPEC.md](src/components/ui/SPEC.md) |
 | `themes` | validated single-file manifests, bundled catalog + atomic token application | yes | [themes/SPEC.md](src/themes/SPEC.md) |
 | `lib` | `cn()` + the shared UI/path/array primitives + highlighting | yes | [lib/SPEC.md](src/lib/SPEC.md) |
@@ -53,7 +54,8 @@ design-system SOURCES (`typography.json`, `colors.json`, `spacing.json`), their 
 structural token contract; per-theme palettes belong to `themes`. Each system is specced beside its source:
 [TYPOGRAPHY.md](src/styles/TYPOGRAPHY.md), [COLOR.md](src/styles/COLOR.md) and [SPACING.md](src/styles/SPACING.md).
 Outside `src/`, **[`scripts/`](scripts/SPEC.md)** is the build-time generator module — it runs under Bun,
-never ships, and turns those three JSON sources into `styles/generated/`.
+never ships, and turns those three JSON sources into `styles/generated/` (plus the vendored provider
+marks into `chat/generated/`).
 `index.html` names the product and links the local, symbol-only SVG favicon derived from the same
 ThinkRail artwork as the shell logo (compact enough for browser-tab sizes and light/dark browser chrome).
 `main.tsx` is the entry/composition root — it synchronously builds the bundled theme catalog, resolves and
@@ -73,13 +75,66 @@ reads `bun.lock` and rejects any second `react` or `react-dom` version. Every Re
 packages together and repeats the mounted-chat memory stress probe before this temporary canary pin can
 return to stable.
 
+**The React Compiler is on for every `apps/web` bundle** (`vite.config.ts`: `@rolldown/plugin-babel` running
+`@vitejs/plugin-react`'s `reactCompilerPreset()` over dev and build). Three devDependencies live in this
+manifest only, and the `@babel/core` 7.x pin is load-bearing: `babel-plugin-react-compiler` 1.0.0 mis-lowers
+destructuring defaults under Babel 8 and silently drops those functions from compilation. Bailouts never
+fail the build — a function the compiler cannot prove safe is skipped whole, not miscompiled — so check it
+ran: a production build's `dist/assets/*.js` carries `react.memo_cache_sentinel` in the hundreds (React's own
+runtime accounts for three). `bun test` transpiles without Vite, so only the browser E2E suite exercises
+compiled output.
+
+The shell, the workbench group views, `ChatView`, `Composer` and `useChatScroll` compile because they keep
+these conventions:
+
+- A latest-value ref (`xRef.current = value`) is written in a `useInsertionEffect`, never in render, and
+  render never reads `ref.current`. Insertion effects run for the whole tree before any layout effect, so a
+  child's layout effect that calls back into the parent (`react-resizable-panels`' `onLayout`, Virtuoso's
+  geometry reads in `useChatScroll`) sees the current value. The effect only assigns refs: no state, no DOM.
+- A hook hands refs back beside render values as a tuple (`useElementSize`), or the caller destructures them
+  (`useCollapsibleRegion`, dnd-kit results): reading a render value off an object that carries a ref counts
+  as a ref read.
+- A ref that travels as a prop is named `*Ref` (`selectionEpochRef`) so handlers may mutate it.
+- A closure that reads refs reaches a `useState` initialiser only through a hook
+  (`useReadingBandController`), and a ref is never handed to a plain helper; the helper becomes a hook that
+  owns it (`useSideResizeBinder`).
+- A default parameter never reads a member expression (`caret = text.length`); resolve it in the body.
+- A closure never applies `++`/`--` to a variable it captures; write `attempts += 1`.
+- A `useMemo`/`useCallback` lists every dependency it reads, or the compiler cannot preserve it.
+- A `useMemo` dependency the callback does not read is dropped, so a memo cannot reset on a key it ignores
+  (`useMemo(() => new Map(), [key])` builds one map per mount). Reset through state keyed on the value instead
+  (`ChatView`'s row-height estimate cache).
+- Render never reads a value the compiler cannot see change — `matchMedia`, storage, `Date.now`, a module
+  singleton. It arrives through `useSyncExternalStore` or state: `AppearanceSettings` subscribes with
+  `onSystemAppearanceChange`, and relative-time labels take `now` from `components/useNow`.
+
+Known bailouts include two hot paths: `useVirtualRows` runs on every `ChatView` render (each streamed delta)
+and `PlanComposer` on every plan-pane keystroke. Shared hooks and resource surfaces also have bailouts;
+compilation of the chat/shell hot paths does not imply coverage of every file/diff renderer.
+
+- Ref access in render: `useVirtualRows` (reads the visible-anchor ref while adjusting state during render;
+  state would cost a render per scroll), `useWorkspaceRead`, `useChatTodos`, `useOpenBranchReview`,
+  `useBranchList`, `useTemplateCommandPicker`, `usePendingSelection`, `MonacoEditor`, `AskUserQuestionCard`,
+  `useScrollViewState`, Pierre diff/file's `useThreadAnnotations`, `PierreDiffSurface`, `PierreFileSurface`,
+  image diff's `ImageContent`, `ImageView`, `PdfView`, `usePdfDocument`.
+- try/finally: `PlanPane` (also a throw inside try), `PlanComposer`, `ReviewPanel`, `SendButtonBase`,
+  `NewWorkspaceDialog`, `SkillsDialog`, `TemplateEditorDialog`, `JetBrainsAiCard`, `ProvidersSettings`,
+  `ModelsSettings`, `GithubSettings`, `LayoutSettings`, `ProjectSkillsNotice`, `StarterTemplatesOffer`.
+- try without catch: `usePromptImages`, `LineWidthControl`.
+- Throw inside try: `DiffPane`.
+- Manual memo dependencies cannot be preserved: `CsvDiff`, `JsonDiff`, `NotebookDiffSurface`, `PdfDiff`.
+- Other: `useLiveTabContent` (`??=`), `useAnalyticsConsent` (a callback that calls itself), `TemplateRow`
+  (a conditional inside try/catch), `HistoryOverlay`'s `Highlight` (mutates a closure counter).
+
+A new bailout is a regression unless it joins this list.
+
 ### Dependency graph
 
 - `navigation` → `store`, `transport`, `contracts` (type-only); neither dependency imports it, and `main.tsx` initializes the integration
-- `shell` → children `shell/layout` + `shell/layoutState`, `updates` (one optional-capability hook + props-driven Settings content and ready affordance), `panels`, `chat` (app-integration render/hydration only), `store`, `transport` (domain hydration + endpoint identity), `contracts` (type-only), `components/ui`, `components` (`ErrorBoundary` around each mounted region + `QuietScrollArea` around shell-owned tool bodies), `constants`, `lib` (platform shortcut semantics), `themes` (the single owner of catalog/media resolution and atomic theme application, driven by the hydrated store preference or pre-hydration hint)
+- `shell` → children `shell/layout` + `shell/layoutState`, `updates` (one optional-capability hook + props-driven Settings content and durable status affordance), `panels`, `chat` (app-integration render/hydration only), `store`, `transport` (domain hydration + endpoint identity), `contracts` (type-only), `components/ui`, `components` (`ErrorBoundary` around each mounted region + `QuietScrollArea` around shell-owned tool bodies), `constants`, `lib` (platform shortcut semantics), `themes` (the single owner of catalog/media resolution and atomic theme application, driven by the hydrated store preference or pre-hydration hint)
 - `shell/layout` → `contracts` (`LayoutPreset` + `GitDiffScope` types only), `lib` (attention/id primitives), and React / `react-resizable-panels` / `@dnd-kit/core`; `shell/layoutState` → `shell/layout`, `store`, `transport` (browser endpoint identity + error normalization), `clientPreferences` (native-stable persistence), `contracts` (`LayoutPreset` type only), `lib`, and React. The parent injects store state and feature renderers, so the pure layout child has no feature-module runtime edge
 - `updates` → `contracts` (native bridge + host notice types), `store` (host notice), `components/ui`, React, and Remix Icon; native snapshots remain shell-local
-- `panels` → `store`, `transport`, `components/ui`, `components` (`ErrorBoundary` for feature bodies + quiet scroll surfaces for panel-owned lists/xterm), `lib`, `contracts`, `constants` (`WelcomePanel`'s wordmark), `prompt` (`NewWorkspaceDialog` consumes the shared slash/template behavior), `chat` (`NewWorkspaceDialog` eagerly reuses `chat/ModelSelector`+`ThinkingSelector`+`useModelCatalog` — these are shiki-free, so the eager import stays split-safe; `TemplatesSettings` reuses `chat/TemplateEditorDialog` for its New/Edit flows — see `panels/SPEC.md`'s `TemplatesSettings` paragraph), `auth` (`ProvidersSettings` mounts `auth/LoginDialog`), `themes` (`AppearanceSettings` consumes the live catalog; code surfaces consume generic theme variables/syntax mapping)
+- `panels` → `resources`, `store`, `transport`, `components/ui`, `components` (`ErrorBoundary` for feature bodies + quiet scroll surfaces for panel-owned lists/xterm), `lib`, `contracts`, `constants` (`WelcomePanel`'s wordmark), `prompt` (`NewWorkspaceDialog` consumes the shared slash/template behavior), `chat` (`NewWorkspaceDialog` eagerly reuses `chat/ModelEffortPicker`+`useModelCatalog`+`useModelPreferences`, `ReviewSettings`/`ModelsSettings` the older `ModelSelector`+`ThinkingSelector`, and `ProvidersSettings` the `chat/modelPicker` connection-kind vocabulary — all shiki-free, so the eager import stays split-safe; `TemplatesSettings` reuses `chat/TemplateEditorDialog` for its New/Edit flows — see `panels/SPEC.md`'s `TemplatesSettings` paragraph), `auth` (`ProvidersSettings` mounts `auth/LoginDialog`), `themes` (`AppearanceSettings` consumes the live catalog; code surfaces consume generic theme variables/syntax mapping), `@shikijs/monaco` (the desktop file renderer's TextMate adapter), `@pierre/diffs` (all source diffs + phone code files), `diff` (engine-neutral mutation blocks, CSV row alignment, and notebook cell similarity), `jsondiffpatch` (structural JSON deltas with move detection), `react-virtuoso` (CSV rows), and `pdfjs-dist` (PDF canvas rendering)
 - `chat` → `contracts` (pi message types, **type-only**), `components/ui`, `prompt` (shared slash/template behavior), `lib`, `clientPreferences`; `store` + `transport`
   (**app-integration files only** — the renderers stay store-free; see `chat/SPEC.md` for the current set)
 - `prompt` → `contracts` (slash/template types only), `lib`, and React; it has no lifecycle integration dependency
@@ -88,14 +143,25 @@ return to stable.
 - `transport` → `contracts`, `store` (welcome routing; the `store → transport` back-edge is type-only, so
   the runtime graph is acyclic), `lib` (plain-HTTP-safe random page identity)
 - `components` (`ErrorBoundary`) → `lib` only (`shallowEqualArrays` for its reset keys — a leaf, so any region can still wrap in it); `components/ui` → `lib`
-- `lib` → `themes` (the lazy highlighter uses the one generic CSS-variable Shiki registration)
+- `resources` → `contracts` (types only), `lib`; it owns no store, transport, shell, or renderer implementation
+- `lib` → `themes` (the lazy highlighter uses the one generic CSS-variable Shiki registration) and React (the phone-viewport hook only)
 - `themes` → `constants` (the branding storage prefix scopes the first-paint hint), `clientPreferences` (native-stable hint storage)
 - leaves (`clientPreferences`, `constants`, `utils`, `styles`) → none internal
 
 Rules: a panel never imports another panel sideways; nothing imports `shell` (it's the composition root).
 
+`@pierre/diffs`, `diff`, `jsondiffpatch`, `react-virtuoso`, `pdfjs-dist`, and `@shikijs/monaco` are
+exact-pinned runtime dependencies. `pdfjs-dist` and its `pdf.worker.min.mjs` worker URL are reached only from
+the lazy PDF renderer chunks; neither belongs in the entry graph. Pierre, its Shiki
+language/theme graph and worker entry, plus Monaco, its curated Shiki grammars and adapter, remain behind
+resource-loader dynamic imports. Only lazy Pierre renderer modules mount the provider, and every mounted
+surface acquires Pierre's module-singleton worker pool; an ordinary workspace therefore neither loads Pierre
+nor initializes its pool. Renderer metadata and loaders are the only eager edge. A production build must
+retain distinct Pierre diff, Pierre file, worker-pool, and Monaco chunks, with none of their implementation
+code in the entry chunk.
+
 The module set: `transport` / `store` / branded `shell` + its headless `shell/layout` child;
-layout-agnostic Project/File/Specs/Changes/Review renderers; lazy Monaco file/diff bodies and xterm terminal
+layout-agnostic Project/File/Specs/Changes/Review renderers; registry-dispatched resource bodies and lazy xterm terminal
 bodies; the shared `prompt` behavior module; and the `chat` module (`ChatView`, content-block renderers, tool registry, and full Composer). The
 workbench owns center and left/right/bottom auxiliary strips/groups around those bodies, never the panels
 themselves.
@@ -106,8 +172,21 @@ themselves.
   use utilities for colour, spacing, borders and layout (`bg-container-header-bg`, `text-primary`,
   `border-border-default`,
   `px-12`) and a **generated semantic typography class** for type (`tr-text-ui`, `tr-title-dialog`,
-  `tr-code-text`, …) — **never inline `style` objects, never raw hex.** Responsive (`md:` …) and states (`hover:` / `focus-visible:`) come
-  from Tailwind (inline styles can't express them, and the responsive shell needs them).
+  `tr-code-text`, …) — **never inline `style` objects except renderer-measured geometry, and never raw
+  hex.** The bounded geometry exception covers values such as intrinsic media bounds, normalized overlays,
+  zoom, swipe position, and portal placement; colour, spacing, and control skin remain token utilities.
+  Responsive (`md:` …) and states (`hover:` / `focus-visible:`) come from Tailwind (inline styles can't
+  express them, and the responsive shell needs them).
+- **Chrome geometry lives in `index.css`, host geometry arrives as CSS custom properties.** Beside the
+  generated colour/spacing layers, `index.css` maps the shell's structural rows (`--spacing-panel-header-row`,
+  `--spacing-topbar-row` from `tokens.css`) and the two host-published window-chrome insets
+  (`--spacing-window-chrome-inset-left|right: var(--window-chrome-inset-*, 0px)`), while the host also
+  publishes `--window-chrome-drag-region`. It declares the only two non-typographic handwritten utilities,
+  `window-drag` / `window-no-drag` (`-webkit-app-region` + `app-region`); `window-drag` is inert unless the
+  host opts in. A host that removed its own caption buttons additionally installs the type-only
+  `NativeWindowControlsBridge` from `contracts`, which the shell turns into HTML window controls. A native host may set these properties on `<html>`; the app never detects the host, it reads
+  the properties with their `0px` fallbacks ([[submodule-web-shell]] owns the consumer, [[module-desktop]]
+  the publisher).
 - **The colour and type systems are this app's, not the monorepo's.** `apps/website` keeps its own
   hardcoded stylesheet on purpose — a static page with no theming has no use for a token layer, and
   reaching across apps would couple them for nothing.
@@ -180,8 +259,11 @@ themselves.
 - **Every code surface is catalog-agnostic.** xterm and Monaco rebuild from generic variables after the
   atomic `[data-theme]` signal, including an optional selected-text foreground. Monaco chooses
   `vs`/`vs-dark` or the corresponding high-contrast base from manifest appearance/contrast metadata,
-  never a theme id. Shiki uses one code-owned TextMate scope map whose colors are semantic CSS variables, so it needs
-  no per-theme import/selector or re-highlight. Mermaid re-derives from the same variables. Reads for
+  never a theme id. Shiki uses one code-owned semantic CSS-variable TextMate map: chat consumes its live
+  references, while Monaco resolves that same map to hex for `@shikijs/monaco`; Pierre's separate
+  `thinkrail` registration also emits live variable references. None needs a per-theme import or selector,
+  and only strict Monaco re-resolves after a swap. Pierre's own inherited diff variables carry semantic feedback
+  and canvas colours into its Shadow DOM. Mermaid re-derives from the same variables. Reads for
   strict consumers still pass through `lib.cssColorToHex`. Data-driven tests enforce the existing
   contrast floor (body/muted ≥ 4.5:1 and hint ≥ 3:1 on the primary declared surfaces) for every discovered
   manifest.
@@ -207,9 +289,10 @@ themselves.
   class a component names is one the generator actually emits (an unknown class is dropped silently by
   Tailwind, so the element renders unstyled while the class list claims otherwise).
 - **A primitive font family may only be named for a documented third-party integration.** Monaco
-  (`panels/monacoSetup.ts`) reads the code family, `s11`, and the default line-height; xterm
+  (`panels/monacoSetup.ts`) reads the code family, `s11`, and the default line-height; Pierre receives the
+  same primitives through the `.pierre-code-surface` custom-property bridge in `index.css`; xterm
   (`panels/TerminalInstance.tsx`) reads the code family + `s13` and owns its row height; mermaid
-  (`chat/tools/visualize/mermaid.ts`) reads the code family. These JS-option integrations are the exhaustive
+  (`chat/tools/visualize/mermaid.ts`) reads the code family. These third-party integrations are the exhaustive
   allowlist in `styles/typographyUsage.test.ts`. Everywhere else a class is required, and
   `<pre>` / `<code>` must carry one even inside a container that has one: preflight targets those elements
   directly, and a directly-matching rule beats an inherited family. Note that the bare arbitrary value
@@ -241,6 +324,13 @@ themselves.
 - Streaming invariant: `text_delta` / `thinking_delta` **APPEND**; `tool_execution_update.partialResult`
   **REPLACE**. Attempt-level `agent_end` never means idle; automatic work ends only at `agent_settled`.
 - Panels stay arrangement-agnostic so the mobile shell is an additive layer, not a rewrite.
+- **Every host HTTP route the app composes is proxied by the Vite dev server.** The app reaches the host
+  over `/ws` and over the two byte routes `/files` and `/blob` (images, PDFs, notebooks, markdown-relative
+  images), always composed through one function (`panels/resourcePane.resourceBytesUrl`) on the
+  transport's HTTP origin. Under `bun run dev` that origin is Vite, and a route Vite does not proxy
+  answers the SPA `index.html` with status 200 — an `<img>` shows nothing and a PDF fetch "succeeds" with
+  HTML, while the host-served build and the e2e suite stay green. `vite.config.ts` therefore proxies
+  `/files` and `/blob` beside `/ws`, and `devProxy.test.ts` pins the list to the composer's constants.
 
 ## Later
 

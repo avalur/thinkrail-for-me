@@ -11,7 +11,10 @@ const modules = {
 	"packages/contracts": "@thinkrail/contracts",
 	"packages/shared": "@thinkrail/shared",
 	"packages/pi-delegation": "pi-delegation",
+	"packages/pi-background-commands": "pi-background-commands",
 	"packages/pi-subagents": "pi-subagents",
+	"packages/pi-dag": "pi-dag",
+	"pi-extensions/visualize": "@thinkrail.ai/pi-visualize",
 	"packages/server": "@thinkrail/server",
 	"apps/web": "@thinkrail/web",
 	"apps/cli": "@thinkrail/cli",
@@ -39,10 +42,12 @@ function fixture(): string {
 		},
 		"packages/shared": { "@thinkrail/contracts": "workspace:*" },
 		"packages/pi-subagents": { "pi-delegation": "workspace:*" },
+		"packages/pi-dag": { "pi-delegation": "workspace:*" },
 		"packages/server": {
 			"@thinkrail/contracts": "workspace:*",
 			"@thinkrail/shared": "workspace:*",
 			"pi-delegation": "workspace:*",
+			"pi-background-commands": "workspace:*",
 			"pi-subagents": "workspace:*",
 		},
 		"apps/web": { "@thinkrail/contracts": "workspace:*" },
@@ -76,7 +81,7 @@ test("accepts the declared package rings and thin launcher edges", () => {
 	write(
 		root,
 		"packages/server/src/value.ts",
-		'import "pi-delegation"; import "pi-subagents"; export * from "@thinkrail/contracts";',
+		'import "pi-delegation"; import "pi-subagents"; import "pi-background-commands"; export * from "@thinkrail/contracts";',
 	);
 	write(root, "apps/web/src/value.tsx", 'import type { Project } from "@thinkrail/contracts";');
 	write(root, "apps/cli/src/value.ts", 'import { bootHost } from "@thinkrail/server";');
@@ -92,6 +97,60 @@ test("accepts the declared package rings and thin launcher edges", () => {
 	);
 
 	expect(moduleBoundaryViolations(root)).toEqual([]);
+});
+
+test("keeps DAG orchestration portable and out of delegation and the unbundled host", () => {
+	const root = fixture();
+	write(root, "packages/pi-dag/index.ts", 'export * from "pi-delegation";');
+	expect(moduleBoundaryViolations(root)).toEqual([]);
+	write(root, "packages/pi-dag/leak.ts", 'import "@thinkrail/server"; import "pi-subagents";');
+	write(root, "packages/pi-delegation/leak.ts", 'import "pi-dag";');
+	write(root, "packages/server/dag.ts", 'import "pi-dag";');
+	expect(moduleBoundaryViolations(root)).toEqual([
+		'packages/pi-dag/leak.ts: import "@thinkrail/server" creates forbidden packages/pi-dag -> packages/server edge',
+		'packages/pi-dag/leak.ts: import "pi-subagents" creates forbidden packages/pi-dag -> packages/pi-subagents edge',
+		'packages/pi-delegation/leak.ts: import "pi-dag" creates forbidden packages/pi-delegation -> packages/pi-dag edge',
+		'packages/server/dag.ts: import "pi-dag" creates forbidden packages/server -> packages/pi-dag edge',
+	]);
+});
+
+test("keeps background commands portable and out of browser imports", () => {
+	const root = fixture();
+	write(root, "packages/pi-background-commands/src/leak.ts", 'import "@thinkrail/server";');
+	write(root, "packages/pi-background-commands/src/delegation.ts", 'import "pi-delegation";');
+	write(
+		root,
+		"apps/web/src/commandLeak.ts",
+		'import type { Command } from "pi-background-commands";',
+	);
+	expect(moduleBoundaryViolations(root)).toEqual([
+		'apps/web/src/commandLeak.ts: import "pi-background-commands" creates forbidden apps/web -> packages/pi-background-commands edge',
+		'packages/pi-background-commands/src/delegation.ts: import "pi-delegation" creates forbidden packages/pi-background-commands -> packages/pi-delegation edge',
+		'packages/pi-background-commands/src/leak.ts: import "@thinkrail/server" creates forbidden packages/pi-background-commands -> packages/server edge',
+	]);
+});
+
+test("keeps published pi packages free of host imports and unwired from the host until their wiring PR", () => {
+	const root = fixture();
+	write(root, "pi-extensions/visualize/index.ts", 'import { Type } from "typebox";');
+	expect(moduleBoundaryViolations(root)).toEqual([]);
+	write(
+		root,
+		"pi-extensions/visualize/src/leak.ts",
+		'import "@thinkrail/server"; import "pi-delegation";',
+	);
+	write(root, "packages/server/src/early.ts", 'import "@thinkrail.ai/pi-visualize";');
+	write(
+		root,
+		"apps/web/src/early.ts",
+		'import type { VisualizeParams } from "@thinkrail.ai/pi-visualize";',
+	);
+	expect(moduleBoundaryViolations(root)).toEqual([
+		'apps/web/src/early.ts: import "@thinkrail.ai/pi-visualize" creates forbidden apps/web -> pi-extensions/visualize edge',
+		'packages/server/src/early.ts: import "@thinkrail.ai/pi-visualize" creates forbidden packages/server -> pi-extensions/visualize edge',
+		'pi-extensions/visualize/src/leak.ts: import "@thinkrail/server" creates forbidden pi-extensions/visualize -> packages/server edge',
+		'pi-extensions/visualize/src/leak.ts: import "pi-delegation" creates forbidden pi-extensions/visualize -> packages/pi-delegation edge',
+	]);
 });
 
 test("keeps artifact test infrastructure out of product code", () => {

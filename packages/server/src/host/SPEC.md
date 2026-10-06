@@ -5,7 +5,7 @@ status: active
 title: host — the browser↔host wire
 parent: module-server
 depends-on: [module-contracts]
-tags: [v1, host, public-surface-checked]
+tags: [host, public-surface-checked]
 ---
 
 ## Responsibility
@@ -18,9 +18,30 @@ channel fan-out, and the process-boot wrapper both launchers share.
 - **Owns:** `server.ts` (async `createServer` first asks auth to start Central artifact watching and publish
   the initial current PI runtime, falling back to plain PI with closed `load-failed` state when needed, then creates
   `Bun.serve` with `/health`, `/ws` upgrade, a
-  **`GET /files/<workspaceId>/<relpath>`** route streaming a worktree file's raw bytes (via `fs`'s
-  `resolveWorktreeFile` — path-contained; bad id/escape/miss → 404; Bun infers the content-type) so the
-  markdown viewer's relative `<img>`s resolve, static serving with
+  **`GET /files/<workspaceId>/<relpath>`** route streaming a worktree file's raw bytes from `Bun.file`
+  after classifying only its bounded 8 KiB head (via `fs`'s `resolveWorktreeFile` — path-contained; bad
+  id/escape/miss → 404; `Cache-Control: no-store`, because the worktree moves under the URL) so the
+  markdown viewer's relative `<img>`s resolve, the sibling
+  **`GET /blob/<workspaceId>/<oid>/<relpath>`** route serving that path's bytes **at one commit**
+  (`git.readBlobStreamAtAsync` behind a 40/64-hex `oid` — a diff range's `resolvedOriginalOid`, so the URL
+  names immutable content and answers `Cache-Control: public, max-age=31536000, immutable`; the Git
+  primitive requires a blob, so trees/commits/gitlinks are 404 alongside a bad id/oid/escape/absent
+  path). Before opening a blob body, the route performs a bounded `git cat-file -s`; objects above
+  `BLOB_SIZE_LIMIT` (64 MiB — the size of the largest image, PDF or notebook a review surface renders
+  in one piece, and the bound on what one `change.revert` receipt may pin) are refused with 413. An
+  accepted blob is **streamed**: only its 8 KiB sniff head is awaited for the headers and the rest relays
+  `git cat-file`'s stdout chunk by chunk, so concurrent image or PDF diffs cost pipe buffers, not blobs,
+  of host memory; the body goes out chunked (a streamed body carries no `Content-Length`), a consumer
+  that disconnects kills its `git` — through the body's cancel once it streams, and through the
+  request's `signal` while the sniff head is still awaited — and the relay's own deadline is five
+  minutes, so a slow reader stalls `git` on the pipe rather than racing the 55 s network budget. Both routes exist
+  because `fs.readFile` and `git.diffFile` answer `""` for bytes they must not decode, so a byte-only
+  resource is fetched over HTTP instead. Both derive `Content-Type` through the shared byte classifier plus
+  filename fallback (falling back to `application/octet-stream`) and
+  send `X-Content-Type-Options: nosniff`; active same-origin types (`text/html`,
+  `application/xhtml+xml`, `image/svg+xml`) additionally receive
+  `Content-Security-Policy: sandbox; default-src 'none'`, so direct navigation cannot execute repository
+  script, static serving with
   `index.html` fallback, the `server.welcome` push, the **`?client=` page identity** read off the socket URL at
   upgrade (threaded to every handler as `RequestContext`; it addresses terminal output but no longer *owns*
   PTYs — see [[submodule-server-terminal]]) plus the `clientKey → socket` registry and the **replay-namespace
@@ -81,9 +102,18 @@ channel fan-out, and the process-boot wrapper both launchers share.
   socket close,
   an optional boot-time `openProject(projectPath)` (best-effort — a launcher convenience), the
   **analytics wiring** (`initializeAnalytics` at boot from launcher provenance, destination, and per-run
-  additional-data suppression; `analyticsEnabled` plus `analyticsConsentConfirmed` control only the
-  additional tier, synced from the settings publisher. Basic events remain on in human runs. Consent
-  changes clear additional-event correlation so re-enabling cannot reconstruct pre-consent work.
+  additional-data suppression; startup grants the additional tier only when `analyticsEnabled &&
+  analyticsConsentConfirmed`. After boot, the settings publisher still broadcasts every merged config but
+  changes the analytics grant only when its successful applied update explicitly carries `analyticsEnabled`,
+  so unrelated writes preserve the current grant and the dialog's preference prime can enable it.
+  `analyticsConsentConfirmed` controls the web prompt lifecycle. Its unconfirmed on-prime may enable ordinary
+  additional capture, but browser attribution starts only from confirmed-on state: directly after the final
+  applied dialog update (the UI is ready), or for a saved choice only through the launcher's explicit
+  `RunningServer.startAttributionClaim()` readiness signal after normal UI readiness. Revocation cancels the
+  claim generation. Basic
+  events remain on in human runs. Consent changes clear additional-event correlation so re-enabling cannot
+  reconstruct pre-consent work; campaign-only enrichment is inactive while off and restored from its strict
+  server record when on without retrying a consumed claim.
   `shutdownAnalytics()` remains a best-effort drain in `stop()` and awaited by graceful shutdown;
   every capture site lives here, including the existing basic events: `chat_started` in `session.create`, `message_sent` (via the
   local `trackSend(mode, text)`) after an **accepted** `session.prompt`/`session.steer`/`session.followUp`
@@ -101,7 +131,8 @@ channel fan-out, and the process-boot wrapper both launchers share.
   Opaque-loader provider membership identifies Central without opening its auth/configuration surface.
   Additional setup/run/task/review/PR observations use the closed triggers in
   [[submodule-server-analytics]], with transient consent-scoped correlation and task-artifact reconciliation.
-  Host alone mediates these events; no install-announcement or provider-change capture exists.
+  Host alone mediates these events; analytics initialization emits the packaged-install lifecycle event,
+  while no provider-change capture exists.
   Setup observes existing read results, never triggers provider work; only explicit setup mutations count.
   Run timing starts at canonical `agent_start`, with local send intent recorded before calling pi (not
   after `ackSend`); unproven provenance stays unknown and retries remain one cycle until `agent_settled`.
@@ -136,18 +167,33 @@ channel fan-out, and the process-boot wrapper both launchers share.
   except a session blocked on `ask_user_question`: shutdown deliberately leaves that call dangling and the
   next attach repairs it to an answerable ack; explicit user Stop remains the terminal-abort path); `handlers.ts` (the WS method→handler
   registry, including `workspace.rename` as the direct manual door into
-  `renameWorkspace(id, name, { lock: true, renameBranch: false })` — the workspaces module changes only the
+  `renameWorkspace(id, name)` (no `branch` option) — the workspaces module changes only the
   display label, persists, and publishes it, so the handler never mutates Git, emits, or patches a client
-  separately — and the **Skills-manager set**: `skill.list` / `skills.state` / `project.skills` build
+  separately. The host's `resolveNewChatModel` composes AppConfig settings with the agent's settled available
+  model list and Pi thinking clamp; `model.default`, `session.create`, and newly-created review chats share
+  that resolver, and creation passes its model and effort explicitly. A `session.create` that **named** a
+  model and every `session.setModel` also record the resolved model as recent through `settings`'
+  `noteRecentModel` — a default-resolved creation is the host's choice, not the user's, and is not
+  recorded. `model.contextSettings` and `model.setContextWindow` delegate to agent's `modelContext`
+  adapter and return its `ModelContextSetting[]`; the mutation names a provider/model target or all
+  eligible pairs, never arbitrary model metadata, and successful saves reuse `provider.changed` to
+  invalidate catalogs across clients. Existing review chats and plan-review
+  subagents keep their own policies — and
+  the **Skills-manager set**: `skill.list` / `skills.state` / `project.skills` build
   the admission context from `projects` (+ the
   workspace's `skillOverrides` when workspace-scoped) and pass it into agent's `listSkillCommands`/
   `listSkillCatalog`; `session.list` decorates agent's `listSessions` summaries with
   `openTodos: countOpenTodos(…)` per session (a host-only composition of `agent` + `todos` — `agent`
   stays todos-free; a failed count omits the field, never fails the list); **`todo.requestFix`** is the
   same kind of composition (`todos` records + renders the fix package, `agent` delivers): the package is
-  fired **detached** into the item's own chat via `followUpSession` (`fireTodoFixPrompt`, the
-  `fireReviewPrompt` pattern) — a pre-turn rejection rolls the review record back (`rollbackTodoFix`) and
-  surfaces as an extension-UI notice, so an undelivered fix request never strands as `changes_requested`.
+  fired **detached** into the item's own chat as a **structured `todo-review-fix` custom message** —
+  `sendReviewFixToSession` (`fireTodoFixPrompt`), which calls `AgentSession.sendCustomMessage` with the
+  rendered package text as `content` (what the agent reads) and `ReviewFixDetails`
+  (`buildReviewFixDetails`: item id/title, the feedback note, and slim path/line-resolved findings) as
+  `details` (what the chat card renders), `deliverAs: "followUp"` + `triggerTurn` — **not** a synthetic
+  user turn (#363). Wrapped in `ackSend` exactly like the old `followUpSession` path, so a pre-turn
+  rejection rolls the review record back (`rollbackTodoFix`) and surfaces as an extension-UI notice, so an
+  undelivered fix request never strands as `changes_requested`.
   The manual fix package **carries the item's open agent findings** exactly like the automated cycle
   does (`itemFixFindings` — this item's unstale agent-authored drafts by `origin`, `markCommentsSent` +
   `buildSendPackage` under `withReviewLock`): with auto-fix off, the verdict path sends nothing, so
@@ -158,130 +204,107 @@ channel fan-out, and the process-boot wrapper both launchers share.
   compensation runs on detached pre-turn rejection;
   **`todo.remove`** layers a host-side guard in front of `todos`' own, together covering the item's
   full in-flight lifetime — neither alone does: `removeTodo`'s durable `pending` mark covers
-  `startTodoReview` (synchronous, before `currentReview` registers post-session-creation) through
-  `review_verdict`, which clears it MID-turn; `isItemUnderActiveReview(sessionId, id)` reads
-  `currentReview` (set once the reviewer session exists, live until `handleReviewerSettled`) and covers
-  the tail `pending` misses — the reviewer's tool seams stay usable after the verdict, until the turn
-  actually settles. The host injects that in-memory guard into `removeTodo`, and the queued removal
-  evaluates it together with the durable guard immediately before deleting; checking before enqueue
-  would leave a wait-behind-reconcile window in which a review could start and reach a verdict. An
-  manual or automatic fix claims one in-memory per-item latch before its first await and remains part of
-  that guard through reflection/package preparation and fix-send acceptance/failure; overlapping manual
-  sends are rejected, and removing the item cannot send a captured fix package for a TODO that no longer
-  exists. The automatic verdict reads candidates before persisting `changes_requested` or clearing its
-  pending mark, so a failed async review read remains cleanup-visible and cannot wedge Review All. A
-  `session.dispose` on a still-
-  streaming reviewer chat aborts it first (mirroring `deleteSession`/`removeWorkspaceSessions`) so the
-  resulting settle event still reaches `handleReviewerSettled` before the session unsubscribes — without
-  that, a closed tab would leak its `currentReview` entry for the process's life, wedging `todo.remove`
-  on an item no review will ever finish;
-  **`todo.startReview` + `host/todoReview.ts`** compose the agent reviewer: **one review in flight
-  per plan** — an in-memory latch (`inFlightReview`, set SYNCHRONOUSLY at start entry, so two starts
-  can't interleave across awaits) held **until the reviewer SETTLES, not until the verdict**: the
-  verdict clears the persisted `pending` flag mid-turn while the reviewer is still streaming, so a
-  pending-based guard would reopen exactly the clobber window it exists to close (`currentReview`
-  overwritten mid-turn → the first review's findings stamped with the second's origin). A manual
-  start against a held latch is rejected loudly (the client also disables the per-row Start review
-  buttons while anything is reviewing); the AUTO re-review defers silently instead of throwing and
-  is RETRIED on the reviewer's settle (see below) — a thrown auto start would strand the
-  changes_requested item forever, and a queue advance whose every `startOne` throws the same guard
-  error would drain and delete the whole Review All pass. The latch clears on: start failure, a
-  rejected detached send, stuck-flag cleanup, and the reviewer's settled turn. Then ensure/pin the plan's
-  reviewer chat, fire the review package detached through the injected `SendReviewPackage` (`followUpSession` in production; a pre-turn rejection clears the `reviewing` mark and the session's `currentReview` registration, unit-tested by injecting a rejecting sender), install the
-  `add_review_comment`/`review_verdict` tool seams (reviewer session → workspace → worker plan via
-  `getSessionWorkspaceId` + `workerSessionForReviewer`; non-reviewer callers get a loud error).
-  **`review_verdict` never trusts the model-supplied `todoId`:** the verdict must name the session's
-  `currentReview` item exactly, else it is rejected loudly (the reviewer re-issues) — a mistyped or
-  stale id would otherwise approve/flag ANOTHER step while the real item stays pending and the queue
-  never sees its verdict. The recorded ref and the queue settlement both derive from the registered
-  `currentReview`, not the params. The auto-fix candidates are the ORIGIN-SCOPED `itemFixFindings`
-  (this item, this worker session, non-stale) — an unscoped draft sweep would carry other steps'
-  findings into this worker and strand them as falsely-sent. **`approve` is rejected while
-  `itemOpenFindings` is non-empty** — checked before `approveTodoReview`, so no verdict can record an
-  item reviewed out from under a finding the Review panel still shows as open: that would let the plan
-  read ready-to-ship / enable Open PR with a blocking comment nobody resolved. The gate is deliberately
-  a WIDER set than the fix-candidate filter: `itemFixFindings` is `draft`-only (a `sent` finding must
-  not ride a second fix request), while the review model counts **both `draft` and `sent`** as
-  unresolved — only `resolve_comment`/dismiss closes one. Gating on the draft-only set would leave the
-  automatic re-review free to approve over a finding already delivered to the worker whose code fix
-  landed without a `resolve_comment`. A **refuted**
-  finding is excluded from the gate: an independent reflector judged it not real and `sendReflectedFix`
-  deliberately holds it back, so nothing in the automated path would ever clear it — gating on it would
-  wedge the item's approval rather than protect it. **`resolve_comment` is the WORKER'S tool, not the
-  reviewer's**: `reviews.applyAgentResolution` only resolves a `sent` comment, and only when the calling
-  session equals `comment.sessionId` — the chat `markCommentsSent` recorded, i.e. whoever it was
-  actually delivered to (`agent/reviewTool.ts`'s handler threads `ctx.sessionManager.getSessionId()`
-  through; a draft finding, sent-or-not, is unconditionally unresolvable, closing the loophole where a
-  reviewer could `add_review_comment` then immediately `resolve_comment` its own still-`draft` finding
-  and sail through the gate it exists to enforce). The reviewer's own way past the gate is therefore
-  never `resolve_comment` — it is the worker actually fixing and resolving a `sent` finding (which the
-  send package's own instructions already ask for), staleness (the reviewed lines got overwritten,
-  `isFindingStale` excludes it), reflection refuting it on a `request_changes` round, or `request_changes`
-  itself.
-  `add_review_comment` first runs the deterministic positioning gate (`reviews.anchorProblem`): a finding
-  citing a path absent from the worktree or a line past EOF is rejected fail-fast (the reviewer re-files)
-  rather than stored as a dud anchor — reanchor can't catch this, since a finding's textQuote is captured
-  from whatever the cited lines held at add time. **`reflect_finding` is scoped to the pending
-  reflection**: the calling session must own a `pendingFix` entry and the comment id must be one of
-  its captured candidates — any workspace session could otherwise stamp kept/refuted onto an
-  unrelated (or human) comment. It then runs the
-  ONE auto fix cycle (reviewer comments → `buildSendPackage` → the worker chat) and the one auto
-  re-review off the reconcile tee (`maybeAutoReReview`); **`todo.reviewAll` + `host/reviewQueue.ts`**
-  add the Review All pass (task-plan-review-kebab): `startReviewAllFlow` seeds a per-(workspace, session)
-  in-memory FIFO with every *unsettled* reviewable item (plan order) and kicks the first. Advancement is
-  TWO-PHASE: a reviewer verdict for the in-flight item (`onReviewVerdict`, all three `review_verdict`
-  branches — approve OR changes_requested, so a requested item's background fix + auto-re-review never
-  stalls the pass) only CLEARS the in-flight slot; the NEXT item starts on the reviewer session's
-  **settled turn** — `handleReviewerSettled`, the ONE session-publisher settle hook, in strict
-  order with NO early exit for a registered reviewer: stuck-flag cleanup (+ queue advance past
-  dead items) → registration drop + latch release → queue advance → auto-re-review retry when nothing started (gated
-  by the monitor's reviewer registry, no disk lookup for non-reviewers). The queue advance runs
-  even after a cleanup (a cleared stale flag that isn't the queue's in-flight item must not stall
-  the pass), but the **auto-re-review retry runs only off a HEALTHY settle**: a crash settle that
-  retried would let a deterministically failing reviewer (context overflow, provider outage)
-  restart itself forever — no verdict ever advances `autoCycles`, so nothing breaks the loop, and
-  an exclusion of just the crashed item would still ping-pong between two eligible items. A
-  deferred re-review instead resumes on the next healthy reviewer settle or worker reconcile;
-  after a crash the human decides (which is what the crash notice tells them). And the **latch is released only by
-  the session that OWNS the in-flight item** (`currentReview[settled] === latch value`) — a stale
-  reviewer chat settling later (superseded pin, user typing in an old reviewer) must not unlock a
-  review that is still streaming elsewhere; a superseded pin's registration is also cleared at
-  re-pin. The **`currentReview` registration itself is dropped on EVERY settle** (healthy or
-  cleanup), owner or not — a registration that outlived its settled turn would let a later user
-  turn in that reviewer chat file comments or a `review_verdict` against the already-settled item
-  with stale provenance, including re-triggering an auto-fix cycle after an approval. Never
-  mid-turn, so the next package can't re-stamp `currentReview`'s origin while the
-  previous turn is still filing comments (the provenance clobber). A pre-turn send rejection advances explicitly (`onReviewStartFailed` in
-  `fireReviewerPrompt`'s rejection path — an undelivered package must not strand the pass, since no
-  verdict or settle will ever come for it), and so does a reviewer that settles with stuck `pending`
-  flags (crash, abort, or a turn that never called review_verdict): `maybeCleanupCrashedReviewSession`
-  routes every cleared item through the same seam, or `queue.current` would stay occupied and every
-  later Review All would answer `alreadyRunning` forever (see reviewerSessionMonitor.SPEC.md). **Starting a
-  pass while one is active is refused** (`{ total: 0, alreadyRunning: true }` on the wire): a second
-  Review All press must not orphan the in-flight review or run two packages in one reviewer chat. The
-  claim is synchronous — `claimReviewQueue` reserves the slot BEFORE `startReviewAllFlow`'s first await
-  (`listTodos`), so two concurrent presses can't both read "not active" and race past the guard; the
-  loser gets `alreadyRunning` immediately instead of clobbering the winner's queue once its plan load
-  resolves. The reservation is always resolved on every exit path — `seedReviewQueue` with the real ids
-  on success, or with `[]` in a `catch` on failure — so a thrown `listTodos` can never leave a stuck
-  placeholder blocking every later Review All. The placeholder's `current` is a private `CLAIMING`
-  sentinel, never `null`: the plan's reviewer chat is pinned and reused across passes (`startTodoReviewFlow`),
-  so its *next* settle can land while a fresh claim's `listTodos` is still pending — with `current: null`
-  that stale settle would read the placeholder as idle and delete it via `onReviewerSettled` before it
-  was ever seeded, reopening the exact race the claim exists to close. `reviewQueue.ts`
-  is pure mechanics with an injected `startOne` (no agent/session dep — unit-tested in
-  `reviewQueue.test.ts`, including the concurrent-claim race and the stale-settle-during-claim race).
-  **The manual and batch entry points are mutually exclusive too, both directions, both claimed
-  synchronously before their own first await:** `startTodoReviewFlow` (manual) rejects when
-  `reviewQueueActive` is already true unless it is the queue's OWN advance calling it
-  (`opts.fromQueue`, set only by `startOneReview`'s closure — every real invocation of that closure
-  comes from queue mechanics that already checked queue membership, so it is always legitimate) —
-  without this, a manual start landing in Review All's claim→`listTodos` gap would set `inFlightReview`
-  first, and every queued item Review All then tries would hit that latch and get silently skipped
-  while the wire still reports the original `total`. `startReviewAllFlow` symmetrically checks
-  `inFlightReview` before ever calling `claimReviewQueue` — a manual review already running reports
-  `alreadyRunning` immediately instead of claiming the queue and discarding the whole batch the same
-  way;
+  `startTodoReview` (synchronous, at start/enqueue) until the verdict clears it;
+  `isItemUnderActiveReview(sessionId, id)` reads the in-memory per-item latches — the fix latch
+  (`claimItemFix`) and `planReviewQueue`'s active set — and covers the tail `pending` misses: the
+  verdict clears the durable mark, but the fix delivery that follows it is still in flight. The host
+  injects that in-memory guard into `removeTodo`, and the queued removal evaluates it together with the
+  durable guard immediately before deleting; checking before enqueue would leave a wait-behind-reconcile
+  window in which a review could start and reach a verdict. A manual or automatic fix claims one
+  in-memory per-item latch before its first await and remains part of that guard through package
+  preparation and fix-send acceptance/failure; overlapping manual sends are rejected, and removing the
+  item cannot send a captured fix package for a TODO that no longer exists;
+  **`todo.startReview` / `todo.reviewAll` + `host/requestReview.ts`** compose the agent reviewer. A plan
+  step is reviewed by a **hidden, ephemeral delegation child** of the plan session (`agent`'s
+  `runReviewSubagent`) carrying OUR reviewer role — `host/reviewerRole.ts` owns the system prompt, the
+  read-only tool set, and the fenced-JSON output contract; the review package `todos` renders is a change-set
+  **reference only** and never names tools. The child returns final text, the host parses the structured
+  verdict (`parseVerdict`, lenient on findings, strict on the verdict word) and owns every state
+  transition. There is no reviewer chat, no reviewer-authored tools (`review_verdict` /
+  `add_review_comment` / `reflect_finding` are gone with it), and therefore no reviewer session to
+  monitor, register, or unstick — the whole crash-recovery surface those needed collapses into the
+  awaited promise: a child that errors, aborts, or returns unparsable text rejects, and the `catch`
+  clears the item's `reviewing` mark (`cancelTodoReview`) on the spot.
+  **Two entry points, one recording path.** The worker's own `request_review` tool (`handleRequestReview`)
+  awaits the verdict and returns it as the tool result — the worker reads `composeText` and fixes inline.
+  The Start review / Review All buttons (`startPlanReview`) mark the item `reviewing` **synchronously**
+  (so the panel shows the pulse the instant the client re-reads the plan) and deliver the outcome through
+  the record + the Review tab. **Both** run the review body on the plan's serial chain
+  (`planReviewQueue.onPlanChain` — the button path fire-and-forget, the tool path awaited), so a tool
+  request never overlaps a button review of another step on the same plan. Both funnel into
+  `recordVerdict`: `approve` settles the item (`approveTodoReview(…, "agent")`); `request_changes` files
+  every finding into the Review tab (`fileFinding` — an inline comment when `reviews.anchorProblem`
+  accepts the position, else review-level; anchor resolution is best-effort so a bad anchor falls back to
+  a review-level comment, but a store-write failure propagates and cancels the review rather than silently
+  dropping the finding while still spending the cycle) and then spends the fix budget.
+  **The 1-cycle cap is the same on both paths.** `canAutoFix = reviewAutoFix !== false && spent < 1`
+  (`todoReviewAutoCycles`), and the record is written with `autoCycles: canAutoFix ? 1 : 2` — `1` means
+  "the worker was actually asked to fix, this item is mid-cycle", `2` is terminal ("the human decides
+  now"). Recording `1` without asking anyone to fix would strand the item: `maybeAutoReReview`'s trigger
+  reads exactly that value, and nothing would ever produce the fresh delta it waits for. **A cycle is spent only once the worker accepts the fix.** On the button path `deliverFixToWorker` owns
+  the whole critical section — file the findings, record the optimistic cycle `1`, select and mark them
+  `sent`, then send — with filing through mark held in one `withReviewLock` so no interleaved Review send
+  can grab the just-filed drafts before reservation. Failure splits on whether filing completed: a *filing*
+  failure throws before any record so the review cancels (`fileFindings` having compensated its partial
+  persist), while any *post-filing* failure — a send rejection (worker detached, busy, pre-turn refusal)
+  **or any preparation failure** (snapshot/package/mark) — re-records the item terminally (`autoCycles: 2`)
+  on top of the optimistic `1`, alongside the `rollbackSend` that returns any marked findings to `draft`.
+  A post-filing failure escaping as a throw would strand the item at `autoCycles: 1` — the whole point of
+  the unified catch. Leaving `1` there would strand the step forever: nothing asked the worker to change anything, so
+  no fresh delta can ever reach `maybeAutoReReview`, while a later manual review would read the cycle as
+  spent and refuse to send. A claim the fix latch refuses (a manual Ask-to-fix already in flight) settles
+  the same way. On the button
+  path a live budget also **delivers the fix to the worker chat** (`deliverFixToWorker`): the item's
+  origin-scoped draft findings (`itemFixFindings` — this item, this worker session, non-stale; an
+  unscoped sweep would carry other steps' findings into this worker and strand them as falsely-sent) are
+  rendered with `renderFixPackage` + `buildSendPackage` and sent as the structured `todo-review-fix`
+  message under `ackSend`, with `rollbackSend` returning them to `draft` on a pre-turn rejection. The
+  tool path never sends — the worker already has the verdict in its tool result, and a second copy as a
+  message would double the instruction. With the budget spent or auto-fix off, both paths leave the
+  findings in the Review tab for the user and say so (`composeText`).
+  **One review at a time per plan** (`host/planReviewQueue.ts`): `onPlanChain` chains each run onto the
+  plan's promise — `enqueuePlanReview` uses it for the detached button path, `handleRequestReview` awaits
+  it for the tool path — so Review All starts N steps but runs them serially and a tool request queues
+  behind an in-flight button review of a different step. N concurrent provider streams is what the chain
+  exists to prevent. The same module holds the per-item claim both entry points check, so a step already
+  under review is refused rather than reviewed twice with two verdicts racing onto one record. `todo.reviewAll` reports `{ total }` — the count it actually started — and `alreadyRunning`
+  only when it started nothing while the plan's chain is still busy. The module is pure mechanics with an
+  injected runner (no agent dep), which is also how `planReview.test.ts` drives the whole verdict →
+  record → deliver path without a provider.
+  **Auto re-review** (`maybeAutoReReview`, tee'd off the reconcile hook on `isTodoToolEnd`): after a fix
+  lands and the worker re-marks the step done, exactly the items still inside their one auto cycle
+  (`autoCycles === 1`, not `reviewing`, `status: "done"`) get re-reviewed. The trigger accepts either a
+  fresh commit delta on a `changes_requested` record OR a record reset to `unreviewed` — the latter is
+  the path-list fallback (`todos/artifacts.ts` drops the record when the redo can't be committed), where
+  a surviving spent cycle is itself the "a fix landed" signal, there being no sha to watermark against.
+  An eligible item is **enqueued onto the plan's serial chain even when another review is already running**
+  (a fix landing while Review All reviews a different step), and the per-item claim dedupes — it must not be
+  dropped when the chain is busy, or a step fixed mid-review would stay `changes_requested` at
+  `autoCycles: 1` forever, since nothing retries once the chain drains.
+  **An `approve` never settles an item that still has open findings.** The two rounds of a fix cycle are
+  independent runs, so nothing structural connects round 2's approve to round 1's findings: the gate is
+  explicit, `itemOpenFindings` checked before `approveTodoReview`. Its set is deliberately WIDER than the
+  fix candidates — `itemFixFindings` is `draft`-only (a `sent` finding must not ride a second fix
+  request), while the review model counts **both `draft` and `sent`** as unresolved, since a worker that
+  fixed the code without calling `resolve_comment` left the finding open. Without the gate the plan reads
+  ready-to-ship and Open PR lights up over a comment the Review panel still shows as blocking. The
+  **inverse also holds, a `changes_requested` verdict must not outlive its findings:** both human paths
+  that close a finding reconcile via `clearChangesRequestedIfResolved` — `review.commentDelete` (deletion)
+  and `review.commentUpdate` (resolve/dismiss). When the closed finding was the item's LAST open one
+  (`itemOpenFindings` empty) and the item is still `changes_requested`, its verdict record is dropped
+  (`dropTodoReviewVerdict`) back to `unreviewed` — ONLY the record: an in-flight review's pending mark
+  (its start-SHA watermark) and the auto-cycle count stay, so closing the last finding mid-review/fix can
+  neither watermark commits the reviewer never saw nor reset the one-cycle cap; the check is a no-op while any finding stays open, so a
+  whole-change verdict that never had an inline finding is never touched. The agent's `resolve_comment`
+  path (`applyAgentResolution`) is deliberately NOT reconciled here — it lands inside a fix cycle whose
+  following re-review re-derives the verdict, and the record is inert either way (the Open-PR gate counts
+  open findings, not the record). The plan chip is host-derived
+  from that record and `apps/web`'s `useChatTodos` re-reads the plan on any review-snapshot change. A blocked
+  approve clears the `reviewing` mark, leaves the record alone, tells the worker to `resolve_comment`
+  what it addressed (`composeText`'s third shape) and rides the wire as
+  `PlanReviewResult.blockedByOpenFindings` so the card cannot claim the step is done. `resolve_comment`
+  stays the WORKER'S tool — `reviews.applyAgentResolution` only resolves a `sent` comment, and only when
+  the calling session equals the chat `markCommentsSent` recorded it as delivered to;
   `project.setTrust`
   acknowledges the aliases present at grant via agent's
   `listProjectAliasSkillNames`; `project.acknowledgeSkills` / `project.setSkillEnabled` /
@@ -293,56 +316,39 @@ channel fan-out, and the process-boot wrapper both launchers share.
   here the same way: `createServer` wires `setSubagentsEnabledResolver` to map an explicit
   `Workspace.subagentsOverride` when present and otherwise use `AppConfig.subagentsEnabled` (unknown
   workspace fails closed), the settings
-  publisher asks `refreshSubagentTools()` to reevaluate all live sessions after any global update, and
+  publisher asks `refreshSubagentTools()` to reevaluate all live sessions after a global update that
+  carries `subagentsEnabled` (likewise `refreshAgentReviewTool()` for `agentReviewEnabled`) — not after
+  every publish, since `recentModels` now publishes on each model switch and a tool-set rebuild per idle
+  session would be pure churn — and
   `workspace.setSubagentsOverride` persists through `workspaces` then refreshes only that workspace. The
   two authoritative publishers remain the clients' convergence path; the host-to-agent refresh changes
   runtime capability, not frontend state;
-  **`reviewerSessionMonitor.ts`** (safety for stuck reviewer sessions) — when a reviewer session crashes/times out
-  without sending a verdict, the item's `pending` review flag (the UI's `reviewing: true` spinner) previously
-  persisted forever, deadlocking the Review All queue. The monitor subscribes to session settled events
-  (tee'd off `setSessionPublisher`), detects crashes (terminal errors, unexpected stop reasons), and
-  immediately clears `pending[id]` for any item the crashed session was reviewing. This unblocks the UI
-  and allows Review All to continue. The mechanism tracks reviewer→worker session mappings (registered
-  once per `startTodoReviewFlow`, cleared on crash detection); see `reviewerSessionMonitor` module and
-  the session-publisher tee in `server.ts`. **This net is itself memory-only** — a host *process*
-  restart (not just one reviewer session settling) wipes the mappings, `currentReview`, and the review
-  queue right along with it, while `pending` marks are a disk sidecar that survives. `createServer` calls
+  **Review marks are memory-plus-disk, and only the disk half survives a restart.** The serial chain and
+  the per-item latches are in-memory; `pending` marks are a disk sidecar. `createServer` calls
   **`reconcilePendingReviewsOnBoot`** once, before the server accepts connections: it walks every project's
   every workspace and calls `todos`' `clearAllPendingReviews(worktreePath)`, which sweeps every session's
-  sidecar and drops every `pending` entry unconditionally — safe because nothing has registered a mapping
-  in this fresh process yet, so every mark found necessarily predates it. Without this, a review in flight
-  at the last shutdown would spin forever (no mapping left to clear it), Review All would skip it forever
-  (its own `reviewing !== true` filter), and its old reviewer chat, if reopened, would get a
-  correct-but-unhelpful "no review is in flight" from `review_verdict` with no way out except this sweep;
-  `ackSend.ts` (the send-ack policy — see "Get right"); `autoRename.ts` (the **workspace auto-rename
-  flow** — the composition of `agent` + `assist` + `workspaces` only the host may make, in **two passes**
-  the session-publisher closure in `createServer` tees fire-and-forget, both triggering a
-  `renameWorkspace` (which **self-emits `workspace.updated`** through the lifecycle publisher — the tee no
-  longer pushes) and both reading the session **transcript** via `getSessionMessages` (never `agent_end.messages` — that
-  array is run-local and empty of the prompt on auto-retry continuations) then `extractFirstTurn` (assist
-  skips killed error/aborted turns, so a retracted prompt never becomes the name); an injectable
-  transcript reader is the unit-test seam:
-  - **Naive (instant):** `maybeNaiveNameWorkspace(sessionId, workspaceId)` when the **first prompt lands**
-    (`isPromptCommitted(event)`, exported: a **user `message_end`** — `agent_start`/`turn_start` fire
-    *before* the prompt's `message_end`, so the transcript wouldn't yet hold the prompt at those; this
-    still fires before the model responds, so the name is instant and no tool/question can block it). It
-    derives a **display name** from the first prompt with assist's non-agentic `naiveWorkspaceName` (no
-    model call) and renames **provisionally** (`renameWorkspace(..., { lock: false })` — name + derived
-    branch move but `renamed` stays unset). It fires only on a **pristine** workspace (`!renamed` AND its
-    **branch** still `workspace-N` — gated on the branch, not the display name, so the two stay decoupled),
-    so it lands once and never overwrites a user/agentic name; a per-workspace `naiveInFlight`
-    set dedupes re-fired prompt-commits. This is why a long first turn no longer leaves the workspace as
-    `workspace-N` for minutes.
-  - **Agentic (refine):** `maybeAutoRenameWorkspace(sessionId, workspaceId)` on every **settled** turn
-    (`isSettledTurn(event)`, exported: `agent_settled` — never `agent_end`, which is attempt-level and can
-    precede compaction/retry even when `willRetry` is false). It asks assist for a
-    human-readable name (cheap model), re-checks the workspace (exists, not `renamed`) after the await,
-    then calls `renameWorkspace` in the same tick — upgrading the provisional naive name into the final
-    name (and its derived branch) and **locking** it (`renamed: true`). Best-effort by contract: every failure path resolves `null` and
-    leaves the flag unset so a later settled turn retries — but a swallowed exception is warn-logged
-    (a broken rename path must stay distinguishable from "assist had nothing"). Its own per-workspace
-    **in-flight set** (independent of the naive one — the two passes can overlap on a short turn) dedupes
-    concurrent turns/sessions.
+  sidecar and drops every `pending` entry unconditionally — safe because nothing has been enqueued in this
+  fresh process yet, so every mark found necessarily predates it. Without this, a review in flight at the
+  last shutdown would spin `Reviewing…` forever and Review All would skip the item forever (its own
+  `reviewing !== true` filter);
+  `ackSend.ts` (the send-ack policy — see "Get right"); `titleTool.ts` (the **`set_title` host**, installed through agent's `setTitleToolHost` — the
+  composition of `agent` + `workspaces` only the host may make). The main agent names things; the host
+  only enforces the write policy (the old host-driven passes — first-words, then a cheap-model refine on
+  the first settled turn, then a send-time cheap-model chat title — kept producing names users wanted to
+  fix):
+  - The calling session must be a live managed session (`getSessionWorkspaceId`); anything else — e.g. a
+    subagent child — gets an error result.
+  - `chat_title` → `renameSession(…, { onlyIfUnnamed: true })`. `workspace_name` → only when the workspace
+    is managed (not `default`/`external`) and not `renamed`, via `renameWorkspace(id, name, { branch })`
+    (locks it, moves the branch once). There is no branch-shape gate, so records an older host's
+    provisional pass left unlocked are still nameable.
+  - The result text states, per target, whether it was applied or kept because it was already named, so
+    the agent stops. A `branch` without a usable `workspace_name` is rejected before any write (the slug
+    would otherwise be silently dropped while the agent believes it is done), and a call that names only
+    the chat while the workspace is still nameable says so, so the agent completes the pair. The first name is final, and a manual rename always wins.
+  - `workspaceNeedsName(sessionId)` uses the same eligibility rule (managed, not `renamed`), so agent's
+    turn-start `pending-naming` reminder and the write policy can't disagree.
+  - A target the agent never names stays unnamed; there is no fallback.
   - The **workspace-archive teardown** — the other composition of `agent` + `terminal` + `workspaces` only
     the host may make. `workspace.remove` **rejects a `kind: "default"` workspace loudly, before any
     side-effect** (the record's `worktreePath` is the project folder — the reclaim's `rm -rf` fallback
@@ -359,9 +365,18 @@ channel fan-out, and the process-boot wrapper both launchers share.
     the reclaim) are down before the dir is deleted, since they hold it as cwd, and the workspace's
     todo-mutation queue is settled (`settleChangeArtifacts`) between the two — an in-flight reconcile's
     plan/baseline writes land before the reclaim that sweeps them, never after it into a resurrected dir. Best-effort by contract —
-    a failed background teardown is warn-logged, never thrown into the void (nothing awaits it), like
-    the auto-rename tee. **Archive keeps the branch but not the chat:** the git branch stays (code is
+    a failed background teardown is warn-logged, never thrown into the void (nothing awaits it). **Archive keeps the branch but not the chat:** the git branch stays (code is
     recoverable), yet chat history is purged with the worktree — a deliberate scope choice, not a leak.
+- **Change mutations are serialized per workspace, on their own chain** (`reviewLock.ts`'s
+  `createKeyedLock` mints both): `change.revert`/`change.undo` run under **`withChangeLock(workspaceId)`**
+  so two reverts cannot interleave their load→verify→write passes, while reviews and changes —
+  independent resources — never queue behind each other. The agent is deliberately **not** paused: the
+  `changes` module's compare-and-swap makes the race safe, and the fs watcher's `fsChanged` tick re-reads
+  the open tabs after a write exactly as it does after an agent edit (so both handlers `ensureWatch`
+  first). The named failures travel as `WsResponse.errorCode`
+  (`STALE_VIEW`/`SCOPE_IMMUTABLE`/`RANGE_INVALID`/`RECEIPT_UNKNOWN`/`UNSUPPORTED_CHANGE`) through the same `CodedError`
+  mapping `UNKNOWN_COMMIT` uses — the dispatch names no codes of its own, so a code added in `contracts`
+  and thrown by a feature reaches the client with no host-side allowlist to update.
 - **Review state is host-composed and serialized per workspace** (`reviewLock.ts`): `review.send*` is
   `reviews` (drafts + package) plus `agent` (session) plus `reviews` again (mark sent + link) — a
   check-then-mark straddling an `await createSession(…)`, the review layer's only non-atomic gap.
@@ -372,11 +387,9 @@ channel fan-out, and the process-boot wrapper both launchers share.
   the agent can never `resolve_comment`. One queue per workspace, so a mutation issued mid-send simply
   happens after it.
   The package prompt is fired **detached** after the mark, so the lock only ever holds session
-  creation, and a failed operation releases it rather than poisoning the queue. The reviewer/reflection
-  agent-tool seams (`add_review_comment`, `review_verdict`, `reflect_finding`) join the same lock: their
-  now-async review reads must not approve over, or save over, a concurrent finding. The reflected-fix
-  read→mark→render pass also stays under it, so Clear cannot replace the candidate IDs between those
-  stages. Deliberately unlocked: `review.get` (its load → re-anchor → persist is one synchronous pass,
+  creation, and a failed operation releases it rather than poisoning the queue. The plan-review verdict
+  path joins the same lock: `deliverFixToWorker`'s file→record→select→render→mark pass stays under it, so
+  a Clear or an interleaved send cannot replace or grab the candidate ids between those stages. Deliberately unlocked: `review.get` (its load → re-anchor → persist is one synchronous pass,
   and hydration must not queue behind a send) — plus the two mutations that remain fully synchronous,
   `reviews.resolveCommentFromAgent` (the worker tool seam) and `reanchorWorkspace` (the fs-watch tee):
   both re-read the snapshot from disk before writing, and neither removes a comment nor closes the
@@ -420,24 +433,28 @@ channel fan-out, and the process-boot wrapper both launchers share.
   subscribes every client so permanent domain deletion converges beyond the initiating page. It remains a
   low-latency event, not a durable queue: a reconnecting client's active-workspace `session.list` is the
   authoritative read-side repair for an event missed while its socket was down.
-- **Activity fan-out:** `createServer` installs the agent module's activity publisher and broadcasts each
-  `SessionActivityPayload` on `session.activity`, which the WS `open` handler subscribes for every client
-  alongside the other session channels; `session.activityList` serves the cross-workspace snapshot, since
-  pushes are never replayed and a reconnecting client would otherwise show a stale rail. That handler is
-  where the workspace **registry** meets the agent: it passes every record's `{id, cwd}` (via
-  `listAllWorkspaceRecords`) so the agent can union on-disk sessions without ever performing a persistence
-  lookup of its own — the same shape as `session.list` receiving one workspace's `worktreePath`. This module also
-  satisfies the agent's **`setActivityProjectResolver`** seam by mapping a workspace id to its
-  `projectId` through the workspace registry (unresolvable → `null`, and the agent then publishes
-  nothing) — the registry lives here, so attribution is composed here rather than the agent learning what
-  a project is. Derivation, precedence, and lifetime belong to [[submodule-server-agent]]; the wire shape
-  and why `projectId` rides each row are in [[module-contracts]].
-- **CLI update notice:** a launcher may supply one optional asynchronous notice producer and fixed interval.
-  `createServer` starts it after listening without awaiting it, repeats it without overlap, retains the latest
-  successful immutable notice for later `server.welcome` snapshots, and publishes `host.updateAvailable` only
-  when that notice first appears or changes. Failure/no-update are silent and preserve a known notice; shutdown
-  clears the timer and makes a late result inert. The host owns only this capability composition—no feed,
-  retry policy, updater, command, persistence, or launcher branch.
+- **Chat Resources:** the scoped resource read, command output/stop and direct-child stop/stop-all
+  handlers enforce each request's exact key set before resolving workspace membership and passing ids plus
+  the registry-owned cwd to the agent barrel. Parent/child ids follow Pi's canonical session grammar
+  (including internal dots); workspace and command ids retain their owner-specific grammar and authority.
+  Missing parents/resources use `RESOURCE_UNAVAILABLE`; output's missing-command result is
+  `available:false` only after validating its parent. No client path/PID field is accepted.
+  The agent's resource publisher maps to `session.resourcesChanged`, subscribed in the WS open handler;
+  this is a catalog invalidation, never an output broadcast. Resource ownership and teardown stay in agent.
+- **Session-state composition:** before serving, the host supplies every workspace `{id,cwd}`, initializes
+  lifecycle/receipt metadata, and installs the workspace→project resolver. `session.stateList` returns the
+  complete all-workspace snapshot; `session.state` broadcasts full records; completion acknowledgement and
+  nudge handlers validate workspace/session identity through the same registry. The WS open handler
+  subscribes every client after welcome. `session.activityList` remains an inert `[]` compatibility method
+  for one window and has no push channel.
+- **CLI update lifecycle:** a launcher may supply one optional asynchronous notice producer, fixed interval,
+  and parameterless update runner. `createServer` starts checks after listening without awaiting them and never
+  overlaps checks. A newer release becomes the retained `available` snapshot in later welcomes. The v70
+  `host.update` request acknowledges after starting one detached, server-single-flighted run; running,
+  succeeded, and failed are full replacements on `host.updateAvailable` for every client. Success latches until
+  host restart and does not shut down or relaunch the unsupervised process; failure permits retry and exposes no
+  child output or arbitrary diagnostic. Discovery failures preserve known state, shutdown makes late results
+  inert, and the host never learns feed, installer, command, path, channel, or version selection.
 - **Interview invitation delivery:** the three user-send handlers share one post-`ackSend` path that
   filters control traffic once, tracks anonymous `message_sent`, and records the local feedback count. The
   feedback module's injected publisher maps an eligible claim to addressed `feedback.interview` delivery
@@ -447,24 +464,21 @@ channel fan-out, and the process-boot wrapper both launchers share.
   the welcome clears the frontend's stale popup projection. Popup `feedback.respond` actions are ordinary
   replay-safe requests and never alter the Settings link.
 - **Chat titles:** `session.rename` resolves `workspaceId` to its cwd and delegates title validation plus the
-  unconditional durable write to `agent`; it never patches one client directly. Immediately before each user
-  send dispatch, the host copies the live Pi transcript without awaiting or starting naming work. Only after
-  that send is accepted does the detached auto-title path proceed, and only when the snapshot has no earlier
-  non-control title-eligible user prompt and the Pi name is absent. Thus a first text turn already present when
-  a session is reattached consumes the opportunity across a host restart; a later request can never become the
-  naming source. `assist` produces a bounded cheap-model candidate or deterministic fallback, and `agent`
-  applies it with `onlyIfUnnamed` after the await. Naming never delays the send's dispatch or ack, and failures
-  stay best-effort (warn-log an unexpected write failure; no user-facing send failure). Image-only, blank,
-  punctuation-only, and internal control sends do not consume the opportunity; a later accepted text prompt
-  may. Concurrent first sends remain per-session single-flighted. There is no settled-turn or per-turn retitle
-  hook. Both manual and automatic writes converge every client through the existing
-  `pi.event`/`session_info_changed` channel and `session.list` repair; no new push channel exists.
+  unconditional durable write to `agent`; it never patches one client directly. Automatic titles come only
+  from the agent's `set_title` (above); sends carry no naming work. Both manual and automatic
+  writes converge every client through the existing `pi.event`/`session_info_changed` channel and
+  `session.list` repair; no new push channel exists.
+
+`RunningServer.startAttributionClaim()` is the explicit launcher-readiness signal and rechecks the saved
+enabled/confirmed choice before entering analytics attribution.
+
 - **Public surface (barrel):** `createServer`, `CreateServerOptions`, `RunningServer`, `bootHost`,
   `BootHostOptions`, `BootedHost`, `BuildKind`.
 - **Allowed deps:** `contracts` (`PROTOCOL_VERSION`, feature-introduction versions, `WS_CHANNELS`); `shared` (`freePort`, `shellEnv` — for
   `boot.ts`); `persistence` (`dataDir` — where `crashLog.ts` writes); `pi-todos/core` (reduced synchronous
   task snapshots, with group status still core-owned); the feature modules it composes (per the parent dependency graph, incl. `fs`'s
-  `resolveWorktreeFile` for the `/files` route); Bun/Node.
+  `resolveWorktreeFile`/`resourceMeta` and `git`'s `readBlobStreamAtAsync` for the `/files` + `/blob`
+  routes); Bun/Node.
 - **Forbidden:** being imported by any feature module; importing `web`/`cli`/`desktop`.
 
 ## Get right
@@ -477,8 +491,8 @@ channel fan-out, and the process-boot wrapper both launchers share.
   the `projects` module's injected publisher) + the workspace lifecycle trio
   (`workspace.created`/`updated`/`removed`, published from the `workspaces` module's injected publisher) +
   **`session.deleted`** (published from the agent module's injected publisher) + **`provider.changed`**
-  (published from auth's Central/runtime invalidation seam) + **`host.updateAvailable`** (published when the
-  optional periodic launcher notice first appears or changes) use push channels. Every
+  (published from auth's Central/runtime invalidation seam) + **`host.updateAvailable`** (published for each
+  retained CLI-update lifecycle replacement) use push channels. Every
   **broadcast** push channel a client should hear must be `ws.subscribe`d in the WS
   `open` handler — a publish on an unsubscribed topic reaches nobody, silently. Four channels are deliberately
   **not** subscribed and not broadcast: `feedback.interview`, `terminal.data`, `terminal.exit`, and
@@ -497,52 +511,6 @@ channel fan-out, and the process-boot wrapper both launchers share.
   fails the request (bad model / missing key; for `answerQuestion` also an unknown/answered/superseded
   call — `assessAnswerability`'s loud verdicts); later faults reach the client via the event stream.
 
-## Reflection layer
-
-A precision-over-recall pass that verifies the agent reviewer's findings before they become a fix
-request, inspired by the deterministic layers of Alibaba's open-code-review. Phase 1 is the synchronous
-positioning gate in the `add_review_comment` seam (`reviews.anchorProblem`). The rest:
-
-- **Independence.** The reviewer that *found* an issue must not be the one that *validates* it (correlated
-  errors), so verification runs as a **separate pi session** with its own `reflecting-findings` skill
-  (adversarial-verify: refute each finding against the code, cite the proving line, default to `refuted`
-  under doubt), not a reviewer self-check.
-- **`reflect_finding` seam** (next to `add_review_comment`): `(commentId, verdict: "kept" | "refuted",
-  confidence, reason)` → host writes the finding's `reflection` via `reviews.setReflection` (persisted;
-  the client badge updates live off the same publish).
-- **Deferred fix-send, not deferred verdict.** Reflection changes only *which findings ride the fix
-  request*, never the verdict outcome or the queue advance — so `review_verdict` records the verdict and
-  settles the queue inline exactly as before; only the request_changes **cycle-1 send** is held. That
-  branch fires a **transient reflector session** (`fireReflection`) over the candidate findings (agent
-  drafts, non-stale) and stashes a `PendingFix` keyed by the reflector's session id. The host cannot
-  await a sub-session (sends are fire-and-forget — see "Get right"), so resumption rides the settle tee:
-  `maybeResumeReflection(settledSessionId)` sends the fix once the reflector settles, carrying only
-  `reflection.verdict !== "refuted"` findings; refuted ones stay drafts, badged, for the human.
-  **A refuted-empty candidate set sends nothing; a candidate-empty verdict still sends.** These are
-  different states, and `sendReflectedFix` tells them apart by `pending.candidateIds.length`, not just by
-  "nothing survived": when the verdict came with **no inline findings at all** (a whole-change concern
-  living only in the verdict `note`, `candidateIds` empty from the start — this never goes through
-  `fireReflection`, which only fires over a non-empty candidate set), the plain `renderFixPackage` (the
-  note is embedded in it) still goes to the worker with no comment package attached — that *is* the fix
-  request. Only when candidates existed and reflection refuted **every one of them** does the send skip
-  entirely: delivering a bare fix request with no surviving findings would ask the worker to act on
-  nothing, so no fresh artifact delta ever lands and `maybeAutoReReview`'s trigger has nothing to fire on,
-  stranding the item at `changes_requested` forever with its one auto cycle spent but never resolved.
-  That branch calls `recordAgentChangesRequested({..., autoCycles: 2})` directly — the SAME terminal
-  settlement `review_verdict` uses when the cycle is already spent or auto-fix is off — so the item reads
-  as a normal "the human decides now" state, and notifies the reviewer chat why nothing was sent.
-  The send follows the same pre-turn rollback guarantee as every review send: a rejected
-  `followUpSession` (worker busy/detached) `rollbackSend`s the just-marked findings back to draft —
-  without it they'd strand as falsely-sent on a `changes_requested` item whose one auto cycle is
-  already spent, invisible to a later manual Ask-to-fix.
-  **Reflection never deletes — it annotates; automation trusts the annotation, the human sees
-  everything.** A transient session per pass (not a pinned reflector) keeps `PendingFix` keys unique so
-  concurrent reflections never collide; the cost is a reflector chat per fix cycle. A create/fire failure
-  falls back to `sendReflectedFix` with no reflection recorded (every candidate `kept`), so a reflector
-  that can't run never strands the fix cycle.
-- **Badge.** Derived in `reviewModel.ts` (`statusLabel`/`threadLabel`) and rendered token-only across the
-  review panel + both inline cards; `refuted` takes precedence over `stale`/`outdated`.
-
 ### Drift & overwrite
 
 A finding is anchored to `side:"worktree"` (the live file — it follows the code inline). When a *later*
@@ -552,13 +520,13 @@ sha to watermark) the record reading `unreviewed` while a spent auto cycle still
 `todos/SPEC.md`'s auto-cycle durability. The **derived `stale`** condition guards
 this — `anchorState === "outdated"` AND the finding's origin sha superseded on its step
 (`todos.reviewedShaSuperseded`). Every agent finding carries `origin` (step + session + reviewed sha,
-stamped from the reviewer session's current step via `currentReview`); `isFindingStale` drops stale
-findings from the auto-fix set (`review_verdict`). The client badge rides a **server-derived, non-persisted
+stamped by `fileFinding` from the review the verdict belongs to); `isFindingStale` drops stale findings
+from the auto-fix set. The client badge rides a **server-derived, non-persisted
 `stale` flag**: `markClientStale` enriches every snapshot crossing to the client (`review.get` +
 the `review.changed` broadcast) — the host is the only ring that can, since staleness joins a finding's
 `origin` (reviews) to its step's commits (todos). `stale` is never a persisted field.
 
-Preserving the *original* reviewed code was considered and rejected for V1: reconstructing it after the
+Preserving the *original* reviewed code was considered and rejected: reconstructing it after the
 fact from `reviewedSha` is unsound (the finding's textQuote came from the add-time worktree, which is not
 guaranteed to equal that blob), and add-time snapshotting is real storage cost for low value (a finding
 whose code was overwritten is usually moot; its prose body survives regardless). If ever needed, the only
@@ -568,5 +536,4 @@ sound route is snapshot-at-add, never freeze-on-drift.
 
 One optional persisted `ReviewComment` field carries finding provenance: `origin?: { todoId, reviewedSha,
 sessionId }` — **landed**. The wire `stale?: boolean` is derived by the host per client snapshot, never
-stored. The `reflection` verdict field lands with the verifier above. No new tool parameter, no new
-`status`/`anchorState` enum value.
+stored. No new tool parameter, no new `status`/`anchorState` enum value.

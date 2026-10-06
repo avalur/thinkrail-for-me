@@ -4,7 +4,16 @@ import {
 	RiChatNewLine as MessageSquarePlus,
 	RiTerminalBoxLine as SquareTerminal,
 } from "@remixicon/react";
-import { lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+	Fragment,
+	lazy,
+	type ReactNode,
+	Suspense,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react";
 import { prepareChatTitle } from "../chat/chatTitle";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { QuietScrollArea } from "../components/QuietScrollArea";
@@ -18,6 +27,7 @@ import { FilePane } from "../panels/FilePane";
 import { FileTree } from "../panels/FileTree";
 import { openFileInTab } from "../panels/openTabs";
 import { ProjectTree } from "../panels/ProjectTree";
+import "../panels/resources/register";
 import { ReviewPanel, selectActiveReviewedPath } from "../panels/ReviewPanel";
 import { reviewFlags } from "../panels/reviewModel";
 import { SpecsPanel } from "../panels/SpecsPanel";
@@ -61,7 +71,13 @@ import {
 	type WorkspaceLayoutDocument,
 } from "./layout";
 import { toLayoutTab, useLayoutIntentProcessing } from "./layoutIntents";
-import { commitWorkspaceLayout, useWorkspaceLayoutState } from "./layoutState";
+import {
+	applyLayoutAttention,
+	commitWorkspaceLayout,
+	emptyWorkspaceProjection,
+	useWorkspaceLayoutState,
+	workspaceProjectionReference,
+} from "./layoutState";
 import { syncLegacySelectionFromAttention, useLegacySelectionAdapter } from "./legacySelection";
 import { useTerminalPlacementReconciliation } from "./terminalReconciliation";
 import { WorkspaceChatHistory } from "./WorkspaceChatHistory";
@@ -206,9 +222,8 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 	const canRenameChat = useAppStore(selectCanRenameChat);
 	const document = useAppStore((state) => state.layoutDocumentsByWorkspace[workspaceId]);
 	const attention = useAppStore((state) => state.layoutAttentionByWorkspace[workspaceId]);
-	const projectionEpoch = useAppStore(
-		(state) => state.layoutProjectionEpochByWorkspace[workspaceId] ?? 0,
-	);
+	const frame = useAppStore((state) => state.workbenchFrame);
+	const projectionEpoch = useAppStore((state) => state.layoutProjectionEpoch);
 	const layoutPreferences = useAppStore((state) => state.localLayoutPreferences);
 	const workspace = useAppStore((state) => selectWorkspaceById(state, workspaceId));
 	const contextProject = useAppStore(selectContextProject);
@@ -292,7 +307,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 		(next: LayoutAttention) => {
 			const state = useAppStore.getState();
 			if (state.removedWorkspaceIds[workspaceId]) return;
-			state.setLayoutAttention(workspaceId, next);
+			applyLayoutAttention(workspaceId, next);
 			syncLegacySelectionFromAttention(workspaceId);
 		},
 		[workspaceId],
@@ -343,7 +358,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 			if (tab.kind === "file") {
 				void getTransport()
 					.request("fs.readFile", { workspaceId, path: tab.path })
-					.then(({ content }) => {
+					.then(({ content, meta }) => {
 						const latest = useAppStore.getState();
 						if (!current || !isConnectedGeneration(latest, connectionGeneration)) return;
 						const placed = currentPlacement();
@@ -356,6 +371,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 								path: placed.path,
 								name: placed.name,
 								content,
+								meta,
 								loadedTick,
 							},
 							"keep",
@@ -371,7 +387,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 				});
 				void getTransport()
 					.request("git.diffFile", { workspaceId, path: tab.path, scope: tab.scope })
-					.then(({ original, modified }) => {
+					.then(({ original, modified, meta, originalOid }) => {
 						const latest = useAppStore.getState();
 						if (!current || !isConnectedGeneration(latest, connectionGeneration)) return;
 						const placed = currentPlacement();
@@ -386,6 +402,8 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 								name: placed.name,
 								original,
 								modified,
+								meta,
+								originalOid,
 								loadedTick,
 								loadedTarget,
 							},
@@ -419,8 +437,16 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 		() => new Map(terminals.map((tab) => [tab.tabKey, tab])),
 		[terminals],
 	);
+	const pendingProjection = useMemo(
+		() =>
+			(document && attention) || !frame
+				? null
+				: emptyWorkspaceProjection(frame, workspaceProjectionReference(workspaceId)),
+		[attention, document, frame, workspaceId],
+	);
+	const rendered = document && attention ? { document, attention } : pendingProjection;
 
-	const renderTabBody = useCallback(
+	const renderResourceBody = useCallback(
 		(tab: LayoutCenterTab | Extract<LayoutTab, { kind: "terminal" }>) => {
 			if (tab.kind === "chat") {
 				return <ChatResourceBody workspaceId={workspaceId} tab={tab} onOpenFile={openToolFile} />;
@@ -486,6 +512,12 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 			workspaceId,
 		],
 	);
+	const renderTabBody = useCallback(
+		(tab: LayoutCenterTab | Extract<LayoutTab, { kind: "terminal" }>) => (
+			<Fragment key={workspaceId}>{renderResourceBody(tab)}</Fragment>
+		),
+		[renderResourceBody, workspaceId],
+	);
 
 	const renderToolBody = useCallback(
 		(tool: LayoutToolId) => {
@@ -513,10 +545,10 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 					);
 					break;
 				case "changes":
-					body = <ChangesPanel workspaceId={workspaceId} />;
+					body = <ChangesPanel key={workspaceId} workspaceId={workspaceId} />;
 					break;
 				case "review":
-					body = <ReviewPanel workspaceId={workspaceId} failed={review.failed} />;
+					body = <ReviewPanel key={workspaceId} workspaceId={workspaceId} failed={review.failed} />;
 					break;
 			}
 			return (
@@ -564,7 +596,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 		[changeAttention, workspaceId],
 	);
 
-	if (!document || !attention) {
+	if (!rendered) {
 		return (
 			<div className="flex h-full items-center justify-center bg-container-content-bg tr-text-ui text-text-muted">
 				Restoring workspace layout…
@@ -575,8 +607,8 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 	return (
 		<div data-testid="workspace-workbench" data-layout-status="settled" className="contents">
 			<Workbench
-				document={document}
-				attention={attention}
+				document={rendered.document}
+				attention={rendered.attention}
 				maxSideGroups={layoutPreferences.maxSideGroups}
 				maxBottomGroups={layoutPreferences.maxBottomGroups}
 				projectionEpoch={projectionEpoch}
@@ -671,6 +703,7 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 				renderCenterActions={(groupId) => (
 					<>
 						<WorkspaceChatHistory
+							key={workspaceId}
 							workspaceId={workspaceId}
 							targetGroupId={groupId}
 							{...(canRenameChat ? { onRenameChat: requestRenameChat } : {})}
@@ -703,6 +736,11 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 				onCommit={commit}
 				onAttentionChange={changeAttention}
 				onUserNavigation={() => useAppStore.getState().noteNavigation(workspaceId)}
+				onDirectTabActivation={(tab) => {
+					if (tab.kind === "chat") {
+						useAppStore.getState().noteDirectChatActivation(tab.sessionId);
+					}
+				}}
 				readNavigationTick={() => selectWorkspaceNavTick(useAppStore.getState(), workspaceId)}
 				{...(canRenameChat ? { onRenameChat: requestRenameChat } : {})}
 				onRequestClose={(tab, prepare) => {
@@ -715,7 +753,14 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 							if (!latest || prepared.document !== latest) {
 								void commitWorkspaceLayout(workspaceId, prepared.document, latest).catch(() => {});
 							}
-							prepared.onAccepted(useAppStore.getState().layoutDocumentsByWorkspace[workspaceId]);
+							const finalState = useAppStore.getState();
+							const finalDocument = finalState.layoutDocumentsByWorkspace[workspaceId];
+							const finalAttention = finalState.layoutAttentionByWorkspace[workspaceId];
+							prepared.onAccepted(
+								finalDocument && finalAttention
+									? { document: finalDocument, attention: finalAttention }
+									: undefined,
+							);
 						};
 						const terminal = terminalByKey.get(tab.tabKey);
 						if (terminal) terminalClose.requestClose(terminal, close);
@@ -736,7 +781,12 @@ export function WorkspaceWorkbench({ workspaceId }: { workspaceId: string }) {
 							) {
 								return;
 							}
-							prepared.onAccepted(current);
+							const currentAttention = state.layoutAttentionByWorkspace[workspaceId];
+							prepared.onAccepted(
+								current && currentAttention
+									? { document: current, attention: currentAttention }
+									: undefined,
+							);
 							if (tab.kind === "chat") {
 								state.closeChatToHistory(tab.sessionId, false, workspaceId, false);
 							} else if (tab.kind === "file" || tab.kind === "diff" || tab.kind === "document") {

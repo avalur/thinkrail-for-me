@@ -3,15 +3,15 @@ title: Introducing ThinkRail
 slug: introducing-thinkrail
 date: 2026-08-19
 author: maciej-gorywoda
-excerpt: ThinkRail is a web-based graphical interface for the Pi Coding Agent, designed to complement its powerful command-line workflow.
+excerpt: ThinkRail is an agentic IDE for the Pi Coding Agent, designed to complement its powerful command-line workflow.
 tags:
   - announcement
   - thinkrail
 ---
 
-#### A Web-Based GUI for Pi Coding Agent
+#### A GUI for Pi Coding Agent
 
-ThinkRail is a web-based graphical interface for the [Pi Coding Agent](https://pi.dev/), designed to complement its powerful command-line workflow. Pi’s strength lies in its flexibility: it is a minimal harness that lets you customize extensions and skills, and configure your working environment to fit your exact needs. This power, however, comes at a cost. New users often find themselves spending significant time learning how to navigate Pi, and even experienced users may find the workflow unnecessarily clunky.
+ThinkRail is a lightweight, agentic IDE for the [Pi Coding Agent](https://pi.dev/), designed to complement its powerful command-line workflow. Pi’s strength lies in its flexibility: it is a minimal harness that lets you customize extensions and skills, and configure your working environment to fit your exact needs. This power, however, comes at a cost. New users often find themselves spending significant time learning how to navigate Pi, and even experienced users may find the workflow unnecessarily clunky.
 
 We believe ThinkRail can make Pi more accessible without compromising its power. It provides a visual layer on top of Pi, making it easier to onboard and become productive while preserving all of Pi’s depth and extensibility. What's more, ThinkRail’s integration with Git and GitHub also makes it easier to collaborate on projects in real time.
 
@@ -26,7 +26,8 @@ Download the stable desktop application for your platform:
 
 For either Linux archive, extract it and run `./installer`. Linux desktop builds require Ubuntu 24.04+ or another distribution with glibc 2.38 and the required GTK/WebKitGTK libraries.
 
-Prefer the command line? The CLI-only host remains available for terminal and remote workflows.
+Prefer the command line? The CLI/browser host remains available for terminal and remote workflows. Its install,
+channel, and update options are documented in the [project install guide](https://github.com/JetBrains/thinkrail#install).
 
 **macOS/Linux/WSL:**
 
@@ -69,7 +70,7 @@ In the near future, we will publish several short blog posts like this one to di
 ThinkRail is in the early stages of development, and we are eager to hear your questions and comments. As we continue to build, we want to ensure it addresses the real needs of the Pi community. To help us, we invite you to:
 
 1. **Try ThinkRail**: Launch it locally and try it out!
-2. [**Visit our webpage**](https://thinkrail.ai): The ThinkRail landing page serves a dual purpose: it both describes and demonstrates the product. There you can learn more about each feature and the team behind ThinkRail.
+2. [**Visit our webpage**](https://jb.gg/osk2n7): The ThinkRail landing page serves a dual purpose: it both describes and demonstrates the product. There you can learn more about each feature and the team behind ThinkRail.
 3. [**Browse our GitHub repository**](https://github.com/JetBrains/thinkrail)
 4. [**Take Our Survey**](https://forms.gle/es1ksqAax6hnDWCP8): Share how you use Pi, what frustrates you, and what features you would like to see in ThinkRail. Your input will directly influence our roadmap.
 5. [**Join Our Discord server**](https://discord.gg/Wybu9ceWkY): Say "hi" and let us know what you think about ThinkRail.

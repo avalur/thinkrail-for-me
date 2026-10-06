@@ -25,7 +25,10 @@ const MODULE_RULES: readonly ModuleRule[] = [
 	{ root: "packages/contracts", allowed: [] },
 	{ root: "packages/shared", allowed: ["packages/contracts"] },
 	{ root: "packages/pi-delegation", allowed: [] },
+	{ root: "packages/pi-background-commands", allowed: [] },
 	{ root: "packages/pi-subagents", allowed: ["packages/pi-delegation"] },
+	{ root: "packages/pi-dag", allowed: ["packages/pi-delegation"] },
+	{ root: "pi-extensions/visualize", allowed: [] },
 	{
 		root: "packages/server",
 		allowed: [
@@ -33,6 +36,7 @@ const MODULE_RULES: readonly ModuleRule[] = [
 			"packages/shared",
 			"packages/spec-graph",
 			"packages/pi-delegation",
+			"packages/pi-background-commands",
 			"packages/pi-subagents",
 			"packages/pi-thinkrail-workflow",
 			"packages/pi-todos",
@@ -71,7 +75,7 @@ function normalized(path: string): string {
 
 function workspacePackages(root: string): Map<string, string> {
 	const packages = new Map<string, string>();
-	for (const base of ["apps", "packages"]) {
+	for (const base of ["apps", "packages", "pi-extensions"]) {
 		const basePath = join(root, base);
 		if (!existsSync(basePath)) continue;
 		for (const entry of readdirSync(basePath, { withFileTypes: true })) {

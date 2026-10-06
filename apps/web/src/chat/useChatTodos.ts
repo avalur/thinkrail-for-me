@@ -1,14 +1,42 @@
-import type { PiEvent, SessionEventPayload, TodoPlan } from "@thinkrail/contracts";
+import type {
+	PiEvent,
+	ReviewChangedPayload,
+	ReviewFailedPayload,
+	SessionEventPayload,
+	TodoPlan,
+} from "@thinkrail/contracts";
 import { TODO_NUDGE_PREFIX, WS_CHANNELS } from "@thinkrail/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { tupleKey } from "../lib";
-import { isConnectedGeneration, selectChatTitle, useAppStore } from "../store";
-import { errorText, getSessionMessagesWithSkillBaseline, getTransport } from "../transport";
+import {
+	isConnectedGeneration,
+	selectChatTitle,
+	selectHasNormalizedSessionState,
+	toast,
+	useAppStore,
+} from "../store";
+import {
+	errorText,
+	getSessionMessagesWithSkillBaseline,
+	getTransport,
+	supportsPlanSummaryGeneration,
+} from "../transport";
 import { messagesToRuntime } from "./hydrate";
 import { sessionGlance, shouldNudgeOnAdd } from "./planView";
 
 export function shouldRefreshTodos(event: PiEvent): boolean {
 	return event.type === "tool_execution_end" || event.type === "agent_settled";
+}
+
+// The content eligibility for an auto-drafted plan summary: every step done and no summary yet (agent- or
+// previously auto-authored). The host-capability gate (`supportsPlanSummaryGeneration`) is applied
+// separately, so the request fires only when this holds AND the connected host advertises v69+.
+export function planIsCompleteWithoutSummary(
+	plan: Pick<TodoPlan, "todos" | "groups" | "summary">,
+): boolean {
+	if (plan.summary) return false;
+	const items = [...plan.todos, ...plan.groups.flatMap((group) => group.todos)];
+	return items.length > 0 && items.every((todo) => todo.status === "done");
 }
 
 export interface ChatTodos {
@@ -43,8 +71,6 @@ export function useChatTodos(workspaceId: string, sessionId: string): ChatTodos 
 		},
 		[sessionId, workspaceId],
 	);
-	const reviewerRef = useRef<string | undefined>(undefined);
-
 	useEffect(() => {
 		if (status !== "connected" || connectionGeneration === 0) return;
 		let cancelled = false;
@@ -65,7 +91,6 @@ export function useChatTodos(workspaceId: string, sessionId: string): ChatTodos 
 						isConnectedGeneration(useAppStore.getState(), effectConnectionGeneration) &&
 						live(effectIdentity)
 					) {
-						reviewerRef.current = plan.reviewerSessionId;
 						setData(plan);
 						setFailed(false);
 					}
@@ -92,16 +117,59 @@ export function useChatTodos(workspaceId: string, sessionId: string): ChatTodos 
 		};
 		const unsubscribe = getTransport().subscribe(WS_CHANNELS.piEvent, (payload) => {
 			const event = payload as SessionEventPayload;
-			if (event.sessionId !== sessionId && event.sessionId !== reviewerRef.current) return;
+			if (event.sessionId !== sessionId) return;
 			if (shouldRefreshTodos(event.event)) scheduleRefetch();
 		});
+		// A plan review runs as a hidden subagent (no piEvent for this session) and writes its verdict to the
+		// review record; the host re-broadcasts reviewChanged when it lands, so refetch the plan to show it.
+		// The same broadcast fires for any review edit (a finding deleted/resolved can clear a step's
+		// host-derived changes_requested decoration), so this one subscription covers those too.
+		const unsubscribeReview = getTransport().subscribe(WS_CHANNELS.reviewChanged, (payload) => {
+			if ((payload as ReviewChangedPayload).workspaceId === workspaceId) scheduleRefetch();
+		});
+		// A detached review has no chat to carry a failure; the owning plan raises it as a toast (routed by
+		// sessionId, deduped across split views by the toast body). See panels/SPEC.md.
+		const unsubscribeReviewFailed = getTransport().subscribe(
+			WS_CHANNELS.reviewFailed,
+			(payload) => {
+				const failure = payload as ReviewFailedPayload;
+				if (failure.workspaceId !== workspaceId || failure.sessionId !== sessionId) return;
+				toast.error(failure.message, `Review of “${failure.itemTitle}” failed`);
+			},
+		);
 		return () => {
 			cancelled = true;
 			readGeneration.current += 1;
 			if (refetch) clearTimeout(refetch);
 			unsubscribe();
+			unsubscribeReview();
+			unsubscribeReviewFailed();
 		};
 	}, [connectionGeneration, identity, live, sessionId, status, workspaceId]);
+
+	// When a completed plan carries no agent-authored summary, ask the host to draft one once (a
+	// best-effort cheap-model one-shot). Re-armed if the plan re-opens or its summary clears.
+	const summaryTriedRef = useRef(false);
+	useEffect(() => {
+		if (!data) return;
+		if (!planIsCompleteWithoutSummary(data)) {
+			summaryTriedRef.current = false;
+			return;
+		}
+		// Only ask hosts that advertise the capability (v69+); an older host has no such method.
+		if (!supportsPlanSummaryGeneration(useAppStore.getState().protocolVersion)) return;
+		if (summaryTriedRef.current) return;
+		summaryTriedRef.current = true;
+		const requestIdentity = identity;
+		getTransport()
+			.request("todo.generateSummary", { workspaceId, sessionId })
+			.then((res) => {
+				const summary = res.summary;
+				if (!summary || !live(requestIdentity)) return;
+				setData((prev) => (prev && !prev.summary ? { ...prev, summary } : prev));
+			})
+			.catch(() => {});
+	}, [data, identity, live, sessionId, workspaceId]);
 
 	const add = async (rawTitle: string) => {
 		const title = rawTitle.trim();
@@ -139,7 +207,6 @@ export function useChatTodos(workspaceId: string, sessionId: string): ChatTodos 
 				return reloadPlan();
 			}
 			if (readGeneration.current !== mine || !live(requestIdentity)) return false;
-			reviewerRef.current = plan.reviewerSessionId;
 			setData(plan);
 			return true;
 		} catch {
@@ -219,31 +286,26 @@ export function useChatTodos(workspaceId: string, sessionId: string): ChatTodos 
 	};
 }
 
-async function nudgeAgent(workspaceId: string, sessionId: string, title: string): Promise<void> {
-	const initial = useAppStore.getState();
+const runtimeHydration = new Map<string, Promise<void>>();
+
+export function hydrateSessionRuntime(workspaceId: string, sessionId: string): Promise<void> {
+	const state = useAppStore.getState();
 	if (
-		initial.removedWorkspaceIds[workspaceId] ||
-		initial.deletedSessionsByWorkspace[workspaceId]?.[sessionId]
+		state.sessions[sessionId] ||
+		state.removedWorkspaceIds[workspaceId] ||
+		state.deletedSessionsByWorkspace[workspaceId]?.[sessionId]
 	) {
-		return;
+		return Promise.resolve();
 	}
-	const session = initial.sessions[sessionId];
-	if (session && !shouldNudgeOnAdd(sessionGlance(session))) return;
-	const streaming = session?.isStreaming ?? false;
-	const text = `${TODO_NUDGE_PREFIX}A TODO was added to the list: "${title}". Read the TODO list with todo_list and work any pending items, marking each done with todo_update as you finish.`;
-	try {
-		await getTransport().request(streaming ? "session.followUp" : "session.prompt", {
-			sessionId,
-			text,
-		});
-	} catch {
-		try {
-			const {
-				result: { summary, messages },
-				syncedTick,
-			} = await getSessionMessagesWithSkillBaseline({ sessionId, workspaceId });
+	const connectionGeneration = state.connectionGeneration;
+	const key = tupleKey("session-runtime", workspaceId, sessionId, String(connectionGeneration));
+	const existing = runtimeHydration.get(key);
+	if (existing) return existing;
+	const request = getSessionMessagesWithSkillBaseline({ sessionId, workspaceId })
+		.then(({ result: { summary, messages }, syncedTick }) => {
 			const current = useAppStore.getState();
 			if (
+				!isConnectedGeneration(current, connectionGeneration) ||
 				current.removedWorkspaceIds[workspaceId] ||
 				current.deletedSessionsByWorkspace[workspaceId]?.[sessionId]
 			) {
@@ -256,6 +318,48 @@ async function nudgeAgent(workspaceId: string, sessionId: string, title: string)
 				summary.live ? undefined : syncedTick,
 				{ activate: false },
 			);
+		})
+		.finally(() => runtimeHydration.delete(key));
+	runtimeHydration.set(key, request);
+	return request;
+}
+
+async function nudgeAgent(workspaceId: string, sessionId: string, title: string): Promise<void> {
+	const state = useAppStore.getState();
+	if (
+		state.removedWorkspaceIds[workspaceId] ||
+		state.deletedSessionsByWorkspace[workspaceId]?.[sessionId]
+	) {
+		return;
+	}
+	const text = `${TODO_NUDGE_PREFIX}A TODO was added to the list: "${title}". Read the TODO list with todo_list and work any pending items, marking each done with todo_update as you finish.`;
+	if (selectHasNormalizedSessionState(state)) {
+		try {
+			await getTransport().request("session.nudge", { workspaceId, sessionId, text });
+		} catch (err) {
+			console.warn("todo nudge skipped:", errorText(err));
+		}
+		return;
+	}
+	await legacyNudgeAgent(workspaceId, sessionId, text);
+}
+
+async function legacyNudgeAgent(
+	workspaceId: string,
+	sessionId: string,
+	text: string,
+): Promise<void> {
+	const initial = useAppStore.getState();
+	const session = initial.sessions[sessionId];
+	if (session && !shouldNudgeOnAdd(sessionGlance(session))) return;
+	try {
+		await getTransport().request(session?.isStreaming ? "session.followUp" : "session.prompt", {
+			sessionId,
+			text,
+		});
+	} catch {
+		try {
+			await hydrateSessionRuntime(workspaceId, sessionId);
 			const hydrated = useAppStore.getState();
 			const recovered = hydrated.sessions[sessionId];
 			if (

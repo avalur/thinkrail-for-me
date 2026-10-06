@@ -16,6 +16,7 @@ export type {
 
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, Model, StopReason, TextContent } from "@earendil-works/pi-ai";
+import type { ProviderAuthKind } from "./domain";
 
 const NON_EXECUTABLE_TOOL_CALL_STOP_REASONS: ReadonlySet<string> = new Set([
 	"error",
@@ -32,7 +33,27 @@ export type WireModel = Pick<
 	"id" | "name" | "provider" | "contextWindow" | "reasoning"
 > & {
 	thinkingLevels: ThinkingLevel[];
+	/** Per-million-token list prices; absent from hosts older than the picker-metadata protocol. */
+	cost?: { input: number; output: number };
+	/** Accepted input modalities; absent from hosts older than the picker-metadata protocol. */
+	input?: Model<string>["input"];
+	/** How the model's provider is connected — decides whether `cost` is what the user pays. */
+	auth?: WireModelAuth;
 };
+
+export interface WireModelAuth {
+	kind: ProviderAuthKind;
+	/** Account, plan, or variable name behind the connection (e.g. `ANTHROPIC_API_KEY`), when pi knows it. */
+	detail?: string;
+}
+
+/** `WireModel` identity is `{provider, id}`; every other field is a catalog snapshot that may lag. */
+export function sameModel(
+	a: Pick<WireModel, "provider" | "id"> | null | undefined,
+	b: Pick<WireModel, "provider" | "id"> | null | undefined,
+): boolean {
+	return !!a && !!b && a.provider === b.provider && a.id === b.id;
+}
 
 export interface RefreshedModels {
 	models: WireModel[];
@@ -44,9 +65,36 @@ export interface AgentSettlement {
 	errorMessage?: string;
 }
 
+export type SessionInputKind = "question" | "dialog";
+
+export type SessionInputState =
+	| { interactionId: string; kind: "question" }
+	| {
+			interactionId: string;
+			kind: "dialog";
+			request: Extract<ExtUiRequest, { kind: "select" | "confirm" | "input" | "editor" }>;
+	  };
+
+export type SessionCompletion =
+	| { completionId: string; outcome: "succeeded" | "interrupted" | "cancelled" }
+	| { completionId: string; outcome: "failed"; failure: "error" | "length" };
+
+export interface SessionState {
+	execution: "idle" | "running";
+	runId: string | null;
+	needsInput: SessionInputState | null;
+	completion: SessionCompletion | null;
+	completionUnread: boolean;
+	queuedCount: number;
+}
+
+type WithWireMessage<E> = E extends { message: AgentMessage }
+	? Omit<E, "message"> & { message: WireAgentMessage }
+	: E;
+
 export type PiEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
-	| { type: "agent_end"; messages: AgentMessage[]; willRetry: boolean }
+	| WithWireMessage<Exclude<AgentEvent, { type: "agent_end" }>>
+	| { type: "agent_end"; messages: WireAgentMessage[]; willRetry: boolean }
 	| { type: "agent_settled"; terminal: AgentSettlement | null }
 	| {
 			type: "queue_update";
@@ -149,6 +197,7 @@ export interface SessionSummary {
 	openTodos?: number;
 	lastSettlement?: AgentSettlement | null;
 	queue?: SessionQueueState;
+	state?: SessionState;
 }
 
 export type SlashCommandSource = "extension" | "prompt" | "skill";
@@ -261,6 +310,27 @@ export interface WireCompactionSummary {
 }
 
 export type TranscriptMessage = Message | WireCustomMessage | WireCompactionSummary;
+
+export interface WireBranchSummary {
+	role: "branchSummary";
+	summary: string;
+	fromId: string | null;
+	timestamp: number;
+}
+
+export interface WireBashExecution {
+	role: "bashExecution";
+	command: string;
+	output: string;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	truncated: boolean;
+	fullOutputPath?: string;
+	timestamp: number;
+	excludeFromContext?: boolean;
+}
+
+export type WireAgentMessage = TranscriptMessage | WireBranchSummary | WireBashExecution;
 
 const TRANSCRIPT_MESSAGE_ROLES: ReadonlySet<string> = new Set([
 	"user",

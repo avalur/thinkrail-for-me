@@ -6,9 +6,11 @@ import type {
 import {
 	customMessageText,
 	isAskUserAnswersMessage,
+	isBackgroundCommandCompletionMessage,
 	isControlMessage,
 	isRetriedAttempt,
 	isSubagentCompletionMessage,
+	isTodoReviewFixMessage,
 } from "@thinkrail/contracts";
 import { userText } from "../lib";
 import { assistantFailureText } from "./assistantFailure";
@@ -72,10 +74,21 @@ export function messagesToRuntime(
 			};
 		} else if (isAskUserAnswersMessage(message)) {
 			askAnswers[message.details.toolCallId] = message.details.result;
+		} else if (isBackgroundCommandCompletionMessage(message)) {
+			turnId = transcriptTurnId(message, index, options);
+			turns.push({ kind: "backgroundCommandCompletion", id: turnId, details: message.details });
 		} else if (isSubagentCompletionMessage(message)) {
 			turnId = transcriptTurnId(message, index, options);
 			turns.push({
 				kind: "subagentCompletion",
+				id: turnId,
+				details: message.details,
+				text: customMessageText(message.content),
+			});
+		} else if (isTodoReviewFixMessage(message)) {
+			turnId = transcriptTurnId(message, index, options);
+			turns.push({
+				kind: "reviewFix",
 				id: turnId,
 				details: message.details,
 				text: customMessageText(message.content),

@@ -6,7 +6,7 @@ title: auth — provider status + in-app login
 parent: module-server
 depends-on: [module-contracts, module-shared]
 references: [submodule-server-agent, central-integration]
-tags: [v1, auth, pi]
+tags: [auth, pi]
 ---
 
 ## Responsibility
@@ -41,9 +41,15 @@ ourselves and never surface a credential value over the wire.
     the TTL window is deliberately served stale until the next read past it. The probe never runs mid-action
     or while a rebuild is outstanding, so it cannot delay a Connect or a candidate cutover.
     Assembly is a pure `buildProviderReport(sources)` over a narrow sources slice, unit-tested with
-    fixture data. Its runtime reads are restricted to the generation's provider-id allowlist captured before
-    the opaque Central extension loads (after invariant host registrations): Central-owned provider objects,
-    auth capabilities, credentials, and details never become ordinary provider rows or cross the wire.
+    fixture data; the kind/detail mapping itself is `agent`'s `describeProviderAuth`, shared with the
+    catalog's per-model `WireModel.auth` projection so a provider row and a picker row never disagree. Its runtime reads are restricted to the generation's provider-id allowlist captured before
+    the opaque Central extension loads (after invariant host registrations): providers Central *introduces*
+    never become rows or cross the wire. A built-in Central *replaces* (`anthropic`, `openai`, `google-vertex`
+    in the real artifact) stays a row — the user must be able to see which providers reach them through
+    JetBrains AI — and is reported as `kind: "central"` with no `detail`, decided purely by the id's membership
+    in the generation's `opaqueProviderIds`; its `name` is the generation's pre-extension display name (pi
+    composes `extension.name ?? base.name`, so a live read would hand an artifact-chosen string to the client),
+    while `configured` and `canLogout` follow the ordinary reads and Central's `baseUrl`/`apiKey` are never read.
     - **OAuth-capable ids are first-class rows.** The id universe unions model-catalog providers,
       stored-credential providers (`listCredentials()`), **and** providers whose `Provider.auth.oauth`
       is present — an OAuth id can differ from any model-provider id (`openai-codex` ≠ `openai`), and a
@@ -56,15 +62,18 @@ ourselves and never surface a credential value over the wire.
       hand-maintained exclusion sets are gone; `openai-codex` reports `false` because pi's provider has
       no key auth, not because we said so). `canLogout` = the id has a stored
       **auth.json** credential (`credentialProviders`) — the only auth the host can remove; env / models.json-
-      keyed auth report `false` (Sign-out would no-op, so the strip hides it). Central is represented only by
-      the dedicated closed lifecycle, never inferred or attached to a provider row.
+      keyed auth report `false` (Sign-out would no-op, so the strip hides it). Central's own lifecycle is only
+      the dedicated closed `jbcentral` status, never a row; the `central` kind on a replaced built-in is an
+      identity fact, never inferred from model URLs or configuration.
   - `providerLogin` — the in-app credential **writes**, session-less (a login runs on the Welcome screen
     before any session exists), so a `loginId`-keyed sibling of `agent/webUiContext`:
     - `startLogin(providerId, type = "oauth")` → `{ loginId }` **synchronously**; `runtime.login(id,
-      type, interaction)` runs **detached** (a flow can take minutes — awaiting it would blow the client
+      type, interaction, piLoginOptions)` runs **detached** (a flow can take minutes — awaiting it would blow the client
       request timeout and block the WS pump). **One bridge, both auth types** (issue #97): `"oauth"` and
       `"api_key"` (the provider-owned interactive key entry — one secret prompt for most providers,
-      multi-prompt for azure/vertex-style creds). pi's `AuthInteraction` is wired to `LoginFrame` pushes
+      multi-prompt for azure/vertex-style creds). `piLoginOptions` (agent barrel) supplies pi's stable
+      installation `deviceId` from the global settings, which pi's openai "Sign in with ChatGPT" flow
+      requires (it throws without one); like pi's CLI it is created on first use, never for other flows. pi's `AuthInteraction` is wired to `LoginFrame` pushes
       on the `provider.login` channel: `notify` `auth_url`→`authUrl`, `device_code`→`deviceCode`,
       `progress`/`info`→`progress` (info links appended as plain URLs); `prompt`
       `select`→a parked `select` frame, `text`/`secret`/`manual_code`→a parked `prompt` frame awaiting a

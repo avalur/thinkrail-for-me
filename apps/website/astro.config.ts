@@ -11,7 +11,12 @@ export default defineConfig({
 	compressHTML: true,
 	integrations: [
 		react(),
-		sitemap({ filter: (page) => page !== "https://thinkrail.ai/agentic-development/" }),
+		sitemap({
+			filter: (page) =>
+				page !== "https://thinkrail.ai/agentic-development/" &&
+				page !== "https://thinkrail.ai/agentic-ide/" &&
+				page !== "https://thinkrail.ai/attribution/claim/",
+		}),
 	],
 	vite: {
 		plugins: [tailwindcss()],

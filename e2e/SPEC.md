@@ -52,8 +52,12 @@ forwards SIGINT/SIGTERM to each tracked group exactly once and individually only
 then force-kills those same non-overlapping targets after a bounded grace even if the root exited. Windows
 first snapshots and retains
 descendant PIDs through PowerShell's `Get-CimInstance Win32_Process`, gracefully falls back when unavailable,
-and uses `taskkill /T` before a root fallback; force targets every retained PID with `taskkill /T /F`. This
-guarantee does not extend to the separate binary or desktop artifact runners. Tests for primary-modifier
+and uses `taskkill /T` before a root fallback; force targets every retained PID with `taskkill /T /F`. Managed
+roots are process-group leaders only on POSIX. On Windows they remain non-detached with `windowsHide: true`,
+so their ordinary Playwright, host, and build descendants inherit a nonvisual console instead of allocating
+visible console windows; Windows tree termination does not depend on detachment. Unit coverage pins only
+this platform-to-detachment selection; native window visibility is verified with a manual Windows console
+probe. This guarantee does not extend to the separate binary or desktop artifact runners. Tests for primary-modifier
 chords read the page's browser-reported platform through one fixture helper and inject Meta on Apple or
 Control elsewhere; hard-coding the runner host's modifier would exercise the wrong product branch under
 browser/platform emulation.
@@ -74,6 +78,28 @@ packaged-desktop suites remain distinct artifact gates. Each has an unsharded, n
 any artifact run and `e2e:serial` still run sequentially in the same worktree. A future launcher or
 deployment adds another host adapter for this same suite, never copied feature specs; shared behavior is
 therefore proven through every composition root.
+
+## Chat resource controls
+
+Resource wire coverage opens persisted chat fixtures through the real UI and checks the authoritative
+catalog's session/workspace scope, missing-output result, unavailable controls and empty stop-all.
+Its wire connection uses the launched page's port, not the source host's fixed port: binary and
+packaged-desktop adapters launch different endpoints for the same test.
+Historical fixtures are seeded before entering their workspace, so discovery does not race a just-created
+placement's persistence during browser reload. It never seeds a running resource or turns transcript
+text into execution authority. The empty-catalog UI probes cover keyboard focus, narrow layouts,
+welcome/reconnect hydration and old-host capability hiding using real responses; the old-host probe
+changes only the advertised protocol version. The transcript-retirement focus probe supplies a completed
+child and persisted-form transcript at the wire seam, then downgrades the next welcome; the UI, reconnect,
+capability retirement and Radix focus teardown remain real. This terminal-only fixture is not evidence of
+agent resource execution. Tagged provider-backed probes launch real commands and
+children through agent tools, inspect bounded plain-text logs/transcripts, verify chat isolation,
+reload and closed-popover completion, and exercise individual Stop and confirmed Stop all. They never
+select a model or seed a running-resource catalog. SDK faux-provider unit tests are not evidence of
+browser agent execution.
+
+Native wheel probes target the actual transcript viewport again after clicking a floating Latest
+button; a pointer left at a removed overlay is not evidence of a gesture delivered to the scroller.
 
 ## Desktop-backed mode
 
@@ -96,14 +122,19 @@ whether credentials exist, and how an action fails are independent facts about a
 made real combinations unrepresentable, and a state that cannot be reached is a failure mode nothing asserts
 (`update --install` refusing while the host is below the minimum needs both at once). It
 materializes a test-owned synthetic PI extension written solely against PI's public API; no Central artifact,
-source fragment, output string, route, constant, binary, or secret is copied. Browser scenarios cover
+source fragment, output string, route, constant, binary, or secret is copied. Like the real artifact it both
+introduces a novel provider (never a row) and re-registers the built-in `anthropic` (a configured row
+labelled JetBrains AI with no Sign-out, gone again once the artifact is removed). Browser scenarios cover
 absent/outdated/malformed probes plus an above-minimum version staying ready, update, sign-in/retry, native
 add/remove, synchronous-action
 serialization, watched external add/change/remove, successful current-generation cutover for new chats, old
 live-chat coexistence after Disconnect, and boot/runtime retention after a closed synthetic-extension load
-failure. Unit coverage owns action single-flight, watcher debounce/coalescing, stale-candidate rejection, boot
-with and without the opaque extension, and exact-model no-fallback for new or reattached chats after Central
-is removed. There is no legacy migration, busy-turn drain, reattachment of live chats, compensation,
+failure. External replacement waits for the settled configured verdict and verifies that the replacement
+model is visible while the old model is gone. A fast candidate may finish before a browser poll observes
+`configuring`; that pending-work state is checked with a held candidate in the server unit fixture, not a
+minimum-visible-duration assumption in the browser. Unit coverage owns action single-flight, watcher
+debounce/coalescing, stale-candidate rejection, boot with and without the opaque extension, and exact-model
+no-fallback for new or reattached chats after Central is removed. There is no legacy migration, busy-turn drain, reattachment of live chats, compensation,
 affected-chat blocking, or recovery seal to test. Sentinel values in synthetic child output, extension
 diagnostics, and provider routing fields
 are asserted absent from the closed results and rendered settings surface; structural DTO allowlists and
@@ -142,8 +173,8 @@ Connect is withheld while the verdict says signed out, every connect-driven scen
 button appears instead of assuming it — a verdict left behind by an earlier scenario would otherwise hide it,
 exactly as it would for someone returning to the panel inside the window. Each state is also captured as a
 review PNG under `e2e/screenshots/<group>/`
-(gitignored, stable path, one element shot per state, retina). Screenshots are evidence, never the
-assertion — a state that only a picture would catch is a missing `data-testid`. Identical files across
+(gitignored, stable path, one element shot per state, retina, CSS animations fast-forwarded so a
+spring mid-flight never ends up in the picture). Screenshots are evidence, never the assertion — a state that only a picture would catch is a missing `data-testid`. Identical files across
 scenarios are a finding, not a defect: they are how the suite shows two distinct host situations rendering
 one indistinguishable card.
 
@@ -158,19 +189,23 @@ used when the variable is absent). A missing artifact, failed generation, or una
 before any provider turn; PI's ordinary first-available fallback is never accepted as test configuration.
 The same copy and hermetic environment seed the private restart host.
 
-**Workspace activity** (`workspace-activity.spec.ts`) covers the Projects rail's agent-state glyphs without
-an agent, and is the reason the host's `failed`/`waiting` derivations read the transcript: a seeded fixture
-transcript (an assistant with `stopReason: "error"`, or an `ask_user_question` call plus its `ack` tool
-result) becomes real activity, so the whole chain — host derivation, `session.activity` push, store fold,
-rollup, render — runs for real on the no-agent lane. It asserts the row's `data-activity` and the glyph's
-`aria-label` (never the tooltip, which needs hover), the rollup breakdown when one workspace holds both
-states, and the collapsed-project rollup.
+**Session state** coverage seeds complete transcript states and drives normalized host blockers/runs to pin
+Projects rail presentation: both needs-input and owner-globally unread results render the same static green
+attention dot (“Needs attention”), while genuinely running sessions pulse the existing workspace/project
+identity icon without changing its colour. The rail must not substitute question/check/result glyphs or a
+spinner. Running alone has no attention dot; queued, hidden/background, and explicitly stopped sessions stay
+quiet; a live blocked question keeps its dot while its orthogonal running pulse may coexist. Reconnect/restart
+snapshots, direct-versus-passive activation, owner-global clearing, and snapshot
+retry are covered; live-agent coverage pins `data-running`/`running-icon` breathing behavior and coexistence with
+`data-attention`/`attention-dot`. These are stable visual hooks rather than alternate state models. The retired `session.activityList → []` compatibility method
+remains a focused handler test.
 
-Two entry paths are covered on purpose. Opening the chat attaches the session and exercises the **live**
-path; a **reload after seeding** exercises the **disk** path — the snapshot union — by asserting the glyph
-appears while the workspace is never activated and no chat tab exists, which is the reviewer scenario a
-host restart produces. Note that **seeding must happen after `openFixtureProject`**: `openAppFresh` calls
-`resetState`, which deletes the isolated agent dir's `sessions` tree, so anything seeded earlier is wiped.
+**Topbar chrome** (`topbar-chrome.spec.ts`) proves the web side of the desktop title-bar contract without a
+desktop: it injects the three host-published CSS properties (`--window-chrome-inset-left|right`,
+`--window-chrome-drag-region`) from the test and asserts spacer widths, logo/action-cluster offsets, an
+unchanged 40px workbench origin, the header's resolved `-webkit-app-region`, and that Update, quota Retry
+and Settings all live inside the `no-drag` action cluster. In a plain browser the properties are unset, so
+the first scenario pins the zero-inset, `no-drag` baseline and the theme-token header colour.
 
 Workbench scenarios exercise the normalized frontend-local frame rather than only the pure model: frame
 geometry/tool placement survives workspace switches while resource tabs and attention differ; closing a final
@@ -188,14 +223,23 @@ placement, not a layout revision or peer geometry synchronization.
 
 ## Isolation contract
 
+The no-agent setup seeds a test-owned empty `models.json` and never reads or copies developer
+`auth.json` or `models.json`; provider scenarios use synthetic fixtures, and the separately authorized
+real-Central mode keeps its opaque-artifact-only credential contract above. Model-context coverage
+exercises the Default / 1M / Custom selector through the real host: shared and per-provider saves,
+retained live-chat limits versus new-chat metadata, Custom validation and Apply focus, cross-client
+convergence with draft invalidation, sanitized read/write failures with Retry, mobile keyboard use,
+and pre-v76 hiding.
+
 General and private-restart fixtures seed additional analytics off with consent already confirmed, so
 unrelated scenarios stay unblocked. They also seed the automatic interview invitation as permanently
 dismissed: the serial agent lane intentionally accumulates accepted prompts across scenarios, while dedicated
 feedback coverage injects and asserts the addressed invitation channel directly. Before any fixture reset
 deletes transcript storage, it lists and disposes every live session through the public wire; disposal aborts
 and settles an unfinished provider turn first, so a test ending mid-turn cannot recreate a headerless JSONL
-behind the next scenario. Consent tests reset the choice over the real settings wire and cover drafts,
-persistence failures, reloads, cross-client convergence, prompt priority, and pre-v64 fallback.
+behind the next scenario. Consent tests reset the choice over the real settings wire and cover on-by-default preference priming,
+Done/ordinary-close acceptance, immediate off refusal, persistence failures and retries, confirmed reloads,
+cross-client convergence, prompt priority, and pre-v65 fallback.
 
 Every concurrent lane derives a distinct data dir, HOME, pi-agent dir, fixture repository, binary cache,
 desktop cache/state plus ready/control files, Playwright transform cache, restart artifacts,
@@ -228,7 +272,14 @@ Windows lane into the real profile (see `module-shared`).
   isolation and port-allocation rules, report orchestration, and the public `e2e*` package commands.
   `e2e/fixtures/git.ts` is the one place specs shell out to `git` (`git`, `gitQuiet`, `gitText`, `gitAs`,
   `commitFile`); `gitAs`/`commitFile` pin a throwaway e2e identity so a seeded commit's authorship never
-  depends on the developer machine's real git config.
+  depends on the developer machine's real git config. `e2e/fixtures/pierre.ts` is the one place specs
+  touch `@pierre/diffs`' DOM (`pierreLines`, `pierreLineNumber`, `selectPierreLine`,
+  `pierreCollapsedContext`, `pierreDeletionsSide`): a Pierre release that renames `data-line`,
+  `data-column-number`, `data-unmodified-lines` or `data-deletions` is a one-file repair, and no spec
+  encodes how a line is selected. `e2e/phone-review.spec.ts` is the phone-class gate for the review
+  surface — Pierre file rendering, unified-only diffs, tap-to-comment and inline placement at
+  `PHONE_VIEWPORT` — reached the way the desktop shell reaches a phone today: open at desktop width, then
+  resize and hide the auxiliary stacks.
 - **Consumes:** the built web artifact, the host's public boot/wire behavior, sanctioned server test-fixture
   exports, CLI binary, the locator from [[module-artifact-tests]], shared retrying teardown helper, git,
   Chromium, and Playwright. Standalone native/installer smoke and shared artifact probes are owned by

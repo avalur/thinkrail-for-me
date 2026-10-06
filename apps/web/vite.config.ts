@@ -1,10 +1,13 @@
 import { fileURLToPath } from "node:url";
+import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+const hostPort = process.env.THINKRAIL_PORT ?? 24242;
+
 export default defineConfig({
-	plugins: [react(), tailwindcss()],
+	plugins: [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()],
 	resolve: {
 		alias: {
 			"@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -15,11 +18,13 @@ export default defineConfig({
 		strictPort: process.env.THINKRAIL_WEB_PORT !== undefined,
 		proxy: {
 			"/ws": {
-				target: `ws://localhost:${process.env.THINKRAIL_PORT ?? 24242}`,
+				target: `ws://localhost:${hostPort}`,
 				ws: true,
 			},
+			"/files": { target: `http://localhost:${hostPort}` },
+			"/blob": { target: `http://localhost:${hostPort}` },
 			"/proxy": {
-				target: `http://localhost:${process.env.THINKRAIL_PORT ?? 24242}`,
+				target: `http://localhost:${hostPort}`,
 				changeOrigin: true,
 			},
 		},

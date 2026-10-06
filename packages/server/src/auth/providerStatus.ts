@@ -1,51 +1,31 @@
 import type {
 	JbcentralInstall,
 	JbcentralStatus,
-	ProviderAuthKind,
 	ProviderStatus,
 	ProviderStatusReport,
 } from "@thinkrail/contracts";
 import { jbcentralInstall } from "@thinkrail/shared/jbcentral";
-import { settledAvailableModels, usePiRuntime } from "../agent";
+import {
+	describeProviderAuth,
+	type ProviderAuthFacts,
+	settledAvailableModels,
+	usePiRuntime,
+} from "../agent";
 import { getJbcentralStatus } from "./jbcentral";
 
 export interface ProviderStatusSources {
 	modelProviderIds: Set<string>;
 	availableProviders: Set<string>;
+	centralProviders: Set<string>;
 	credentialProviders: string[];
 	oauthProviders: { id: string; name: string }[];
 	credentialType: (id: string) => "oauth" | "api_key" | undefined;
-	providerAuth: (id: string) => { source?: string; label?: string };
+	providerAuth: (id: string) => Pick<ProviderAuthFacts, "source" | "label">;
 	apiKeyLogin: (id: string) => boolean;
 	displayName: (id: string) => string;
 	hasAuth: (id: string) => boolean;
 	jbcentral: JbcentralStatus;
 	jbcentralInstall: JbcentralInstall;
-}
-
-function resolveKind(
-	credentialType: "oauth" | "api_key" | undefined,
-	source: string | undefined,
-): ProviderAuthKind {
-	if (credentialType === "oauth") return "oauth";
-	if (credentialType === "api_key") return "api-key";
-	switch (source) {
-		case "environment":
-			return "env";
-		case "models_json_key":
-		case "models_json_command":
-		case "runtime":
-			return "api-key";
-		default:
-			return "other";
-	}
-}
-
-function resolveDetail(source?: string, label?: string): string | undefined {
-	if (label) return label;
-	if (source === "models_json_key") return "models.json";
-	if (source === "models_json_command") return "models.json (command)";
-	return undefined;
 }
 
 export function buildProviderReport(sources: ProviderStatusSources): ProviderStatusReport {
@@ -72,16 +52,15 @@ export function buildProviderReport(sources: ProviderStatusSources): ProviderSta
 			(!sources.modelProviderIds.has(id) && sources.hasAuth(id));
 		if (!configured) return { id, name, configured: false, ...login };
 		const { source, label } = sources.providerAuth(id);
-		const kind = resolveKind(sources.credentialType(id), source);
-		const detail = resolveDetail(source, label);
-		return {
-			id,
-			name,
-			configured: true,
-			kind,
-			...(detail !== undefined ? { detail } : {}),
-			...login,
-		};
+		const credentialType = sources.credentialType(id);
+		const auth = describeProviderAuth({
+			central: sources.centralProviders.has(id),
+			oauth: credentialType === "oauth",
+			apiKeyCredential: credentialType === "api_key",
+			...(source === undefined ? {} : { source }),
+			...(label === undefined ? {} : { label }),
+		});
+		return { id, name, configured: true, ...auth, ...login };
 	});
 
 	providers.sort((a, b) => {
@@ -121,12 +100,16 @@ export async function getProviderStatus(): Promise<ProviderStatusReport> {
 		const credentialTypes = new Map(
 			visibleCredentials.map((credential) => [credential.providerId, credential.type]),
 		);
+		const centralProviders = new Set(
+			providerStatusIds.filter((providerId) => generation.opaqueProviderIds.has(providerId)),
+		);
 
 		return buildProviderReport({
 			modelProviderIds: new Set(
 				providerStatusIds.filter((providerId) => runtime.getModels(providerId).length > 0),
 			),
 			availableProviders: new Set(available.map((model) => model.provider)),
+			centralProviders,
 			credentialProviders: visibleCredentials.map((credential) => credential.providerId),
 			oauthProviders: visibleProviders
 				.filter((provider) => provider.auth.oauth)
@@ -137,7 +120,10 @@ export async function getProviderStatus(): Promise<ProviderStatusReport> {
 			credentialType: (id) => credentialTypes.get(id),
 			providerAuth: (id) => runtime.getProviderAuthStatus(id),
 			apiKeyLogin: (id) => Boolean(runtime.getProvider(id)?.auth.apiKey?.login),
-			displayName: (id) => runtime.getProvider(id)?.name ?? id,
+			displayName: (id) =>
+				centralProviders.has(id)
+					? (generation.providerStatusNames.get(id) ?? id)
+					: (runtime.getProvider(id)?.name ?? id),
 			hasAuth: (id) => runtime.getProviderAuthStatus(id).configured,
 			jbcentral,
 			jbcentralInstall: install,

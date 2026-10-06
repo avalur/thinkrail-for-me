@@ -1,12 +1,10 @@
-import type { ThinkingLevel, WireModel } from "./piProtocol";
+import type { SessionState, ThinkingLevel, WireModel } from "./piProtocol";
 
-export type ActivityStatus = "running" | "waiting" | "queued" | "failed";
-
-export interface SessionActivity {
+export interface SessionStateRecord {
 	sessionId: string;
 	workspaceId: string;
 	projectId: string;
-	status: ActivityStatus;
+	state: SessionState;
 }
 
 export interface Project {
@@ -54,6 +52,12 @@ export interface OpenBranchReview {
 	url?: string;
 	/** `workspace.openReview` only: local commits origin/<branch> doesn't have yet. */
 	unpushedCommits?: number;
+	/**
+	 * `workspace.openReview` only: last-known commits on origin/<branch> that HEAD doesn't have (the
+	 * tracking ref may be cached when the fetch fails). A plain push must wait until they're integrated;
+	 * this does not imply the checkout rewrote history or that a force-push is appropriate.
+	 */
+	behindCommits?: number;
 }
 
 export type GhSetupProblem = "missing" | "unauthenticated";
@@ -102,6 +106,13 @@ export interface FileNode {
 	kind: FileKind;
 	gitignored?: boolean;
 	children?: FileNode[];
+}
+
+export interface ResourceMeta {
+	hash: string | null;
+	byteLength: number | null;
+	text: boolean;
+	mime?: string;
 }
 
 export interface SpecGraphNode {
@@ -181,12 +192,11 @@ export interface TodoPlan {
 	groups: TodoGroupItem[];
 	/**
 	 * The agent's overall completion summary (`todo_plan_summary`), written when the whole plan is done.
-	 * Clients show it only while every item stays `done` — a re-opened plan hides it until the agent
-	 * rewrites it at the next completion.
+	 * The plan page keeps it visible while an item re-opens, marked stale ("updating") until the agent
+	 * rewrites it at the next completion; ungated external outputs (markdown export, PR body) still show it
+	 * only while every item stays `done`, so a stale all-done story never leaves the app.
 	 */
 	summary?: string;
-	/** The plan's dedicated reviewer chat (set once Start review ran) — the Reviewing label opens it. */
-	reviewerSessionId?: string;
 	/**
 	 * Worktree changes attributed to NO item of this plan — **host-derived on `todo.list`, present only
 	 * when non-empty**. The honesty section of the review map: work no item claims (edits before the
@@ -214,7 +224,7 @@ export function isDelegationRunDetails(value: unknown): value is DelegationRunDe
 	if (typeof d.childSessionId !== "string" || typeof d.task !== "string") return false;
 	if (typeof d.status !== "string" || !DELEGATION_RUN_STATUSES.includes(d.status)) return false;
 	if (typeof d.durationMs !== "number") return false;
-	for (const field of [d.roleName, d.roleSource, d.model, d.activity]) {
+	for (const field of [d.roleName, d.roleSource, d.model, d.activity, d.abortReason]) {
 		if (field !== undefined && typeof field !== "string") return false;
 	}
 	const u = d.usage as Partial<DelegationRunDetails["usage"]> | undefined;
@@ -249,7 +259,54 @@ export interface DelegationRunDetails {
 	};
 	durationMs: number;
 	activity?: string;
+	abortReason?: string;
 }
+
+export type BackgroundCommandStatus = "running" | "stopping" | "completed" | "error" | "stopped";
+
+export interface BackgroundCommandSummary {
+	id: string;
+	sessionId: string;
+	name: string;
+	command: string;
+	status: BackgroundCommandStatus;
+	startedAt: number;
+	finishedAt?: number;
+	exitCode?: number | null;
+	errorMessage?: string;
+}
+
+export interface BackgroundCommandCompletionDetails
+	extends Omit<BackgroundCommandSummary, "command"> {
+	status: "completed" | "error" | "stopped";
+	finishedAt: number;
+	output: { text: string; truncated: boolean };
+}
+
+export interface SubagentResourceSummary {
+	childSessionId: string;
+	parentSessionId: string;
+	roleName?: string;
+	task: string;
+	status: DelegationRunStatus;
+	createdAt: string;
+	abortReason?: string;
+}
+
+export interface SessionResources {
+	workspaceId: string;
+	sessionId: string;
+	commands: BackgroundCommandSummary[];
+	subagents: SubagentResourceSummary[];
+}
+
+export type BackgroundCommandOutputResult =
+	| {
+			available: true;
+			command: BackgroundCommandSummary;
+			output: { text: string; truncated: boolean };
+	  }
+	| { available: false };
 
 export type GitFileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 
@@ -279,6 +336,26 @@ export interface GitCommit {
 	committedAt: string;
 }
 
+export interface LineSpan {
+	start: number;
+	count: number;
+}
+
+export type RevertTarget =
+	| { kind: "file" }
+	| { kind: "range"; original: LineSpan; modified: LineSpan };
+
+export interface ChangeReceipt {
+	id: string;
+	workspaceId: string;
+	path: string;
+	kind: "revert" | "undo";
+	at: number;
+	before: { hash: string | null; byteLength: number | null; mode: number | null };
+	after: { hash: string | null; byteLength: number | null; mode: number | null };
+	trashed?: string;
+}
+
 export interface RemoteBranchGroup {
 	remote: string | null;
 	branches: { ref: string; branch: string }[];
@@ -291,7 +368,7 @@ export interface BranchList {
 	defaultBranch: string;
 }
 
-export type ProviderAuthKind = "oauth" | "api-key" | "env" | "other";
+export type ProviderAuthKind = "oauth" | "api-key" | "env" | "central" | "other";
 
 export interface ProviderStatus {
 	id: string;
@@ -518,12 +595,22 @@ export interface AppConfig extends ThemePreference {
 	chatLineWidthBounded: boolean;
 	fileLineWidthBounded: boolean;
 	customLayoutPresets: LayoutPreset[];
-	/** The model the plan reviewer + reflector run on; unset ⇒ the pi default. */
+	/** The model new chats start with; unset uses the first available model. */
+	defaultModel?: WireModel;
+	/** New-chat effort; unset defaults to medium. */
+	defaultEffort?: ThinkingLevel;
+	/** The model the plan reviewer runs on; unset uses the host's new-chat model default. */
 	reviewModel?: WireModel;
-	/** Reviewer + reflector thinking level; unset ⇒ the model's default. */
+	/** Reviewer thinking level; unset uses the host's new-chat effort default, never the worker's inherited effort. */
 	reviewEffort?: ThinkingLevel;
+	/** Models the user starred in the picker, in display order; identity is `{provider, id}`. */
+	favoriteModels: WireModel[];
+	/** Models most recently chosen for a chat, newest first; host-maintained, never client-written. */
+	recentModels: WireModel[];
 	/** When false, a `request_changes` verdict records findings and waits — no automated fix cycle. */
 	reviewAutoFix: boolean;
+	/** When false, the worker's in-session `request_review` tool is withheld; the Review button still works. */
+	agentReviewEnabled: boolean;
 	subagentsEnabled: boolean;
 	jbcentralQuotaEnabled: boolean;
 	jbcentralQuotaRefreshSeconds: number;
@@ -531,8 +618,18 @@ export interface AppConfig extends ThemePreference {
 	terminalWindowsShell: TerminalWindowsShell;
 }
 
+/** How many recently chosen models the host remembers. */
+export const RECENT_MODELS_LIMIT = 5;
+
 /** The `settings.update` payload: `null` clears an optional override back to unset (⇒ the default). */
-export type AppConfigUpdate = Partial<Omit<AppConfig, "reviewModel" | "reviewEffort">> & {
+export type AppConfigUpdate = Partial<
+	Omit<
+		AppConfig,
+		"defaultModel" | "defaultEffort" | "reviewModel" | "reviewEffort" | "recentModels"
+	>
+> & {
+	defaultModel?: WireModel | null;
+	defaultEffort?: ThinkingLevel | null;
 	reviewModel?: WireModel | null;
 	reviewEffort?: ThinkingLevel | null;
 };
@@ -572,7 +669,10 @@ export const DEFAULT_CONFIG: AppConfig = {
 	chatLineWidthBounded: true,
 	fileLineWidthBounded: true,
 	customLayoutPresets: [],
-	reviewAutoFix: true,
+	favoriteModels: [],
+	recentModels: [],
+	reviewAutoFix: false,
+	agentReviewEnabled: false,
 	subagentsEnabled: true,
 	jbcentralQuotaEnabled: true,
 	jbcentralQuotaRefreshSeconds: JBCENTRAL_QUOTA_REFRESH_SECONDS.default,
@@ -688,7 +788,8 @@ export type ReviewSelector =
 	| { kind: "lineRange"; startLine: number; endLine: number }
 	| { kind: "textQuote"; exact: string; prefix: string; suffix: string }
 	| { kind: "diffHunk"; hunkHeader: string }
-	| { kind: "structural"; scheme: string; ref: string };
+	| { kind: "structural"; scheme: string; ref: string }
+	| { kind: "region"; x: number; y: number; width: number; height: number; page?: number };
 
 export interface ReviewAnchor {
 	path: string;
@@ -714,12 +815,6 @@ export interface ReviewComment {
 	origin?: { todoId: string; reviewedSha: string; sessionId: string };
 	/** Server-derived for the client, never persisted: the reviewed code was overwritten after review. */
 	stale?: boolean;
-	/** An independent reflector's verdict on an agent finding (refuted findings are held back from auto-fix). */
-	reflection?: {
-		verdict: "kept" | "refuted";
-		confidence: "low" | "medium" | "high";
-		reason: string;
-	};
 	resolvedBy?: "agent" | "user";
 	resolveNote?: string;
 	createdAt: number;
@@ -745,4 +840,95 @@ export interface ReviewSnapshot {
 
 export interface ReviewChangedPayload extends ReviewSnapshot {
 	workspaceId: string;
+}
+
+/** A plan review that failed after `todo.startReview` acknowledged — the detached button/auto path has no
+ * chat of its own, so the owning plan session raises the failure as a toast. `sessionId` routes it to that
+ * plan only; duplicate views of one session dedupe on the toast body. See apps/web/src/panels/SPEC.md. */
+export interface ReviewFailedPayload {
+	workspaceId: string;
+	sessionId: string;
+	itemId: string;
+	itemTitle: string;
+	message: string;
+}
+
+/** Slim view of a sent review finding on a todo-review-fix message (path/lines pre-resolved host-side). */
+export interface ReviewFixComment {
+	id: string;
+	kind: ReviewCommentKind;
+	body: string;
+	path?: string;
+	startLine?: number;
+	endLine?: number;
+}
+
+/** Structured payload of a todo-review-fix custom message; the message `content` stays the agent-read text. */
+export interface ReviewFixDetails {
+	itemId: string;
+	itemTitle: string;
+	reviewId?: string;
+	/** The reviewer's/user's feedback prose (renderFixPackage note), when present. */
+	note?: string;
+	comments: ReviewFixComment[];
+}
+
+export type PlanReviewVerdict = "approve" | "request_changes";
+
+/** Result of the worker-invoked request_review tool (Option A): a review subagent's structured verdict on
+ * a plan step. Carried as the tool result's `details`, rendered by the request_review card, and written to
+ * the item's review record. See submodule-server-host-plan-review + submodule-server-todos. */
+export interface PlanReviewResult {
+	itemId: string;
+	itemTitle: string;
+	verdict: PlanReviewVerdict;
+	reviewedSha?: string;
+	/** The reviewer's one-paragraph rationale (shown on the card). */
+	summary?: string;
+	findings: ReviewFixComment[];
+	/** Host-set on an `approve` it refused to settle: findings from an earlier round are still open, so
+	 * the step stays unreviewed until the worker resolves them. */
+	blockedByOpenFindings?: number;
+}
+
+export const PLAN_REVIEW_VERDICTS: readonly PlanReviewVerdict[] = ["approve", "request_changes"];
+
+const REVIEW_COMMENT_KINDS: readonly ReviewCommentKind[] = ["inline", "diff", "file", "review"];
+
+function isPositiveInt(n: unknown): n is number {
+	return typeof n === "number" && Number.isInteger(n) && n > 0;
+}
+
+/** A single reviewer finding: id + body required; kind (if present) a known enum; a line requires a path,
+ * an endLine requires a startLine, and any range is positive and coherent. See submodule-server-host-plan-review. */
+function isReviewFinding(f: unknown): f is ReviewFixComment {
+	if (!f || typeof f !== "object") return false;
+	const c = f as Partial<ReviewFixComment>;
+	if (typeof c.id !== "string" || c.id.length === 0) return false;
+	if (typeof c.body !== "string" || c.body.length === 0) return false;
+	if (c.kind !== undefined && !REVIEW_COMMENT_KINDS.includes(c.kind)) return false;
+	if (c.path !== undefined && typeof c.path !== "string") return false;
+	if (c.startLine !== undefined && !isPositiveInt(c.startLine)) return false;
+	if (c.endLine !== undefined && !isPositiveInt(c.endLine)) return false;
+	if (c.startLine !== undefined && c.path === undefined) return false;
+	if (c.endLine !== undefined && c.startLine === undefined) return false;
+	if (c.startLine !== undefined && c.endLine !== undefined && c.endLine < c.startLine) return false;
+	return true;
+}
+
+/** Validate the review subagent's parsed JSON verdict (untrusted — model output). Every finding field and
+ * its enum/line coherence is checked, and the verdict/finding cardinality is enforced: a `request_changes`
+ * with no actionable finding is rejected (it would strand the worker), while an `approve` may carry none. */
+export function isPlanReviewResult(value: unknown): value is PlanReviewResult {
+	if (!value || typeof value !== "object") return false;
+	const r = value as Partial<PlanReviewResult>;
+	if (typeof r.itemId !== "string" || typeof r.itemTitle !== "string") return false;
+	if (typeof r.verdict !== "string" || !PLAN_REVIEW_VERDICTS.includes(r.verdict)) return false;
+	if (r.summary !== undefined && typeof r.summary !== "string") return false;
+	if (r.blockedByOpenFindings !== undefined && typeof r.blockedByOpenFindings !== "number")
+		return false;
+	if (!Array.isArray(r.findings)) return false;
+	if (!r.findings.every(isReviewFinding)) return false;
+	if (r.verdict === "request_changes" && r.findings.length === 0) return false;
+	return true;
 }

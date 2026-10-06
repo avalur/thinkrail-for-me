@@ -9,6 +9,7 @@ import {
 	RiAlertLine as TriangleAlert,
 } from "@remixicon/react";
 import {
+	type ModelDefault,
 	PROJECT_TEMPLATE_PREVIEW_PROTOCOL_VERSION,
 	type SlashCommandInfo,
 	type TemplateInfo,
@@ -17,13 +18,18 @@ import {
 	type WireModel,
 	type Workspace,
 } from "@thinkrail/contracts";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ModelSelector } from "@/chat/ModelSelector";
-import { PromptImageChips, usePromptImages } from "@/chat/promptImages";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { type DefaultPairOption, ModelEffortPicker } from "@/chat/ModelEffortPicker";
+import {
+	imagePasteDropHandlers,
+	PROMPT_IMAGE_CHIPS_PADDING,
+	PromptImageChips,
+	usePromptImages,
+} from "@/chat/promptImages";
 import { SkillsButton } from "@/chat/SkillsButton";
 import { SkillsDialog } from "@/chat/SkillsDialog";
-import { ThinkingSelector } from "@/chat/ThinkingSelector";
 import { useModelCatalog } from "@/chat/useModelCatalog";
+import { useModelPreferences } from "@/chat/useModelPreferences";
 import { Button } from "@/components/ui/button";
 import {
 	Command,
@@ -57,6 +63,7 @@ import {
 	TemplateSlotHint,
 	type TemplateSlotSessionState,
 	templateToSlashCommand,
+	usePendingSelection,
 	useSlashCommandCompletion,
 	useTemplateCommandPicker,
 } from "@/prompt";
@@ -81,20 +88,24 @@ export function reconcileModel(
 const PILL =
 	"flex h-32 min-w-0 items-center gap-8 rounded-[var(--radius-sm)] border border-control-border-default bg-clip-padding bg-control-bg px-8 tr-text-ui text-text-default outline-none transition-colors hover:bg-control-bg-hovered focus-visible:ring-2 focus-visible:ring-primary data-[open=true]:border-control-border-active data-[open=true]:bg-control-bg-selected";
 
+async function refreshProjectWorkspaces(projectId: string): Promise<void> {
+	useAppStore.getState().expandProject(projectId);
+	const rows = await getTransport().request("workspace.list", { projectId });
+	useAppStore.getState().setWorkspaces(projectId, rows);
+}
+
 export function NewWorkspaceDialog({
 	open,
 	projectId,
 	initialPrompt,
 	promptNote,
 	onOpenChange,
-	onCreated,
 }: {
 	open: boolean;
 	projectId: string;
 	initialPrompt?: string;
 	promptNote?: string;
 	onOpenChange: (open: boolean) => void;
-	onCreated: (workspace: Workspace) => void;
 }) {
 	const projects = useAppStore((s) => s.projects);
 	const protocolVersion = useAppStore((s) => s.protocolVersion);
@@ -109,15 +120,19 @@ export function NewWorkspaceDialog({
 	const [aliasSkills, setAliasSkills] = useState<string[]>([]);
 	const [model, setModel] = useState<WireModel | null>(null);
 	const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("medium");
+	const [hostDefault, setHostDefault] = useState<ModelDefault | null>(null);
+	const [explicitPair, setExplicitPair] = useState(false);
+	const pendingDefault = useRef<(() => void) | null>(null);
+	const pickExplicitly = useCallback(() => {
+		pendingDefault.current?.();
+		pendingDefault.current = null;
+		setExplicitPair(true);
+	}, []);
 	const attachedImages = usePromptImages();
 	const [creating, setCreating] = useState(false);
 	const [trusting, setTrusting] = useState(false);
 	const [manageSkills, setManageSkills] = useState(false);
 	const promptRef = useRef<HTMLTextAreaElement>(null);
-	const [pendingPromptSelection, setPendingPromptSelection] = useState<{
-		start: number;
-		end: number;
-	} | null>(null);
 	const hostDefaultAsked = useRef(false);
 	const targetGroupName = useId();
 	const [dialogEl, setDialogEl] = useState<HTMLElement | null>(null);
@@ -129,19 +144,7 @@ export function NewWorkspaceDialog({
 		[],
 	);
 
-	const focusPromptSelection = useCallback((start: number, end: number = start) => {
-		setPendingPromptSelection({ start, end });
-	}, []);
-
-	useLayoutEffect(() => {
-		if (!pendingPromptSelection) return;
-		const input = promptRef.current;
-		if (input) {
-			input.focus();
-			input.setSelectionRange(pendingPromptSelection.start, pendingPromptSelection.end);
-		}
-		setPendingPromptSelection(null);
-	}, [pendingPromptSelection]);
+	const focusPromptSelection = usePendingSelection(promptRef);
 
 	const supportsProjectTemplatePreview =
 		protocolVersion !== null && protocolVersion >= PROJECT_TEMPLATE_PREVIEW_PROTOCOL_VERSION;
@@ -198,6 +201,7 @@ export function NewWorkspaceDialog({
 		setCreating(false);
 		attachedImages.reset();
 		hostDefaultAsked.current = false;
+		setExplicitPair(false);
 	}, [open, projectId, initialPrompt, updatePromptDraft, attachedImages.reset]);
 
 	useEffect(() => {
@@ -262,21 +266,36 @@ export function NewWorkspaceDialog({
 		refresh: onRefreshModels,
 		fresh: catalogFresh,
 	} = useModelCatalog(open);
+	const modelPreferences = useModelPreferences(models);
 
 	const applyHostDefault = useCallback(() => {
 		let cancelled = false;
+		const cancel = () => {
+			cancelled = true;
+		};
+		pendingDefault.current?.();
+		pendingDefault.current = cancel;
+		setExplicitPair(false);
 		getTransport()
 			.request("model.default", {})
 			.then((d) => {
+				setHostDefault(d);
 				if (cancelled) return;
+				pendingDefault.current = null;
 				setModel(d.model);
 				setThinkingLevel(d.thinkingLevel);
 			})
 			.catch(() => {});
-		return () => {
-			cancelled = true;
-		};
+		return cancel;
 	}, []);
+
+	const defaultOption: DefaultPairOption = {
+		resolved: hostDefault,
+		active: !explicitPair,
+		onSelect: () => {
+			applyHostDefault();
+		},
+	};
 
 	useEffect(() => {
 		if (!open) return;
@@ -368,7 +387,7 @@ export function NewWorkspaceDialog({
 
 		const store = useAppStore.getState();
 		if (target === "worktree") {
-			onCreated(workspace);
+			void refreshProjectWorkspaces(workspace.projectId).catch(() => {});
 			store.activateWorkspace(workspace);
 		}
 		onOpenChange(false);
@@ -377,7 +396,7 @@ export function NewWorkspaceDialog({
 		try {
 			const { result: session, syncedTick } = await createSessionWithSkillBaseline({
 				workspaceId: workspace.id,
-				...(model ? { model, thinkingLevel } : {}),
+				...(model && explicitPair ? { model, thinkingLevel } : {}),
 			});
 			store.openChatSession(
 				workspace.id,
@@ -542,25 +561,17 @@ export function NewWorkspaceDialog({
 							<span>{promptNote}</span>
 						</p>
 					) : null}
-					<PromptImageChips controller={attachedImages} testId="ws-prompt-images" />
+					<PromptImageChips
+						controller={attachedImages}
+						testId="ws-prompt-images"
+						className={PROMPT_IMAGE_CHIPS_PADDING.dialog}
+					/>
 					<Textarea
 						ref={promptRef}
 						data-testid="ws-prompt"
 						value={prompt}
 						disabled={creating}
-						onPaste={(e) => {
-							const files = [...e.clipboardData.files];
-							if (files.length > 0) {
-								e.preventDefault();
-								attachedImages.addFiles(files);
-							}
-						}}
-						onDrop={(e) => {
-							if (e.dataTransfer.files.length > 0) {
-								e.preventDefault();
-								attachedImages.addFiles([...e.dataTransfer.files]);
-							}
-						}}
+						{...imagePasteDropHandlers(attachedImages)}
 						onChange={(e) => {
 							const next = e.target.value;
 							const nextSlotSession = slotSession
@@ -626,22 +637,25 @@ export function NewWorkspaceDialog({
 
 				<div className="flex flex-wrap items-center gap-8">
 					<div className="flex min-w-0 flex-1 flex-wrap items-center gap-8">
-						<ModelSelector
+						<ModelEffortPicker
 							models={models}
 							current={model}
+							level={thinkingLevel}
 							refreshing={modelsRefreshing}
 							onRefresh={onRefreshModels}
-							container={dialogEl}
-							placeholder="Default model"
-							onSelect={(m) => {
-								setModel(m);
+							onSelect={({ model: next, level }) => {
+								pickExplicitly();
+								setModel(next);
+								if (level) setThinkingLevel(level);
 							}}
-						/>
-						<ThinkingSelector
-							level={thinkingLevel}
-							levels={model?.thinkingLevels ?? []}
+							onSelectLevel={(level) => {
+								pickExplicitly();
+								setThinkingLevel(level);
+							}}
+							preferences={modelPreferences}
+							defaultOption={defaultOption}
 							container={dialogEl}
-							onSelect={setThinkingLevel}
+							className="max-w-full"
 						/>
 					</div>
 					<button

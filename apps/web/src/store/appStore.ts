@@ -1,5 +1,4 @@
 import type {
-	ActivityStatus,
 	AppConfig,
 	AskUserQuestionResult,
 	ComposerGrowthLimit,
@@ -20,12 +19,14 @@ import type {
 	PiEvent,
 	Project,
 	RefreshedModels,
+	ResourceMeta,
 	ReviewChangedPayload,
 	ReviewSnapshot,
-	SessionActivity,
-	SessionActivityPayload,
 	SessionEventPayload,
 	SessionQueueState,
+	SessionResources,
+	SessionState,
+	SessionStateRecord,
 	SessionStats,
 	SessionSummary,
 	SlashCommandInfo,
@@ -47,10 +48,12 @@ import {
 	HUB_PROJECT_ID,
 	HUB_WORKSPACE,
 	isAskUserAnswersMessage,
+	isBackgroundCommandCompletionMessage,
 	isControlMessage,
 	isLineWidth,
 	isSubagentCompletionMessage,
 	isTerminalWindowsShell,
+	isTodoReviewFixMessage,
 	normalizeThemePreference,
 } from "@thinkrail/contracts";
 import { create } from "zustand";
@@ -85,13 +88,23 @@ import type {
 } from "../shell/layout";
 import type { ConnectionStatus } from "../transport";
 import {
+	type ChatResourceRead,
+	type ChatResourceScope,
+	type ChatResourceSnapshots,
+	staleChatResources,
+} from "./chatResources";
+import {
 	type HistoryTarget,
+	isChatResourceReadCurrent,
+	isChatResourceScopeAlive,
 	selectActiveWorkspaceProjectId,
+	selectAttentionCenterTab,
 	selectLayoutResourcePlacement,
 	selectWorkspaceById,
 	selectWorkspaceNavTick,
 	selectWorkspaceSessionIds,
 	selectWorkspaceTick,
+	supportsChatResources,
 } from "./selectors";
 
 export interface StreamingResponseMovement {
@@ -111,7 +124,9 @@ export interface FileTab {
 	name: string;
 	path: string;
 	content: string;
-	view?: "rendered" | "source";
+	meta?: ResourceMeta;
+	rendererId?: string;
+	viewState?: unknown;
 	loadedTick?: number;
 }
 export interface ChatTab {
@@ -141,8 +156,11 @@ export interface DiffTab {
 	loadedTarget: string;
 	original: string;
 	modified: string;
+	meta?: { original: ResourceMeta; modified: ResourceMeta };
+	originalOid?: string | null;
+	rendererId?: string;
+	viewState?: unknown;
 	view?: DiffTabView;
-	rendered?: boolean;
 	ignoreWhitespace?: boolean;
 	loadedTick?: number;
 }
@@ -279,6 +297,7 @@ export type LayoutIntentInput = LayoutIntent extends infer Intent
 
 export const SettingsSection = {
 	Providers: "providers",
+	Models: "models",
 	Github: "github",
 	Appearance: "appearance",
 	LineWidth: "line-width",
@@ -293,16 +312,13 @@ export const SettingsSection = {
 } as const;
 export type SettingsSection = (typeof SettingsSection)[keyof typeof SettingsSection];
 
-export interface WorkspaceActivity {
-	projectId: string;
-	sessions: Record<string, ActivityStatus>;
-}
-
 export interface Toast {
 	id: string;
 	variant: "error" | "success" | "info";
 	message: string;
 	title?: string;
+	durationMs?: number;
+	action?: { label: string; onClick: () => void };
 }
 
 const MAX_TOASTS = 5;
@@ -352,6 +368,7 @@ export interface SessionRuntime {
 	extUiQueue: ExtUiDialogRequest[];
 	extUiStatus: Record<string, string>;
 	extUiWidget: Record<string, string[]>;
+	hostState: SessionState | null;
 }
 
 const EMPTY_QUEUE: SessionQueueState = { steering: [], followUp: [] };
@@ -382,6 +399,7 @@ function newRuntime(
 		extUiQueue: [],
 		extUiStatus: {},
 		extUiWidget: {},
+		hostState: null,
 	};
 }
 
@@ -589,6 +607,19 @@ export function reduceSessionEvent(rt: SessionRuntime, event: PiEvent): SessionR
 				const { toolCallId, result } = event.message.details;
 				return { ...rt, askAnswers: { ...rt.askAnswers, [toolCallId]: result } };
 			}
+			if (isBackgroundCommandCompletionMessage(event.message)) {
+				return {
+					...rt,
+					turns: [
+						...rt.turns,
+						{
+							kind: "backgroundCommandCompletion",
+							id: crypto.randomUUID(),
+							details: event.message.details,
+						},
+					],
+				};
+			}
 			if (isSubagentCompletionMessage(event.message)) {
 				return {
 					...rt,
@@ -596,6 +627,20 @@ export function reduceSessionEvent(rt: SessionRuntime, event: PiEvent): SessionR
 						...rt.turns,
 						{
 							kind: "subagentCompletion",
+							id: crypto.randomUUID(),
+							details: event.message.details,
+							text: customMessageText(event.message.content),
+						},
+					],
+				};
+			}
+			if (isTodoReviewFixMessage(event.message)) {
+				return {
+					...rt,
+					turns: [
+						...rt.turns,
+						{
+							kind: "reviewFix",
 							id: crypto.randomUUID(),
 							details: event.message.details,
 							text: customMessageText(event.message.content),
@@ -720,6 +765,12 @@ function reduceExtUi(
 		case "confirm":
 		case "input":
 		case "editor":
+			if (
+				rt.pendingExtUi?.id === request.id ||
+				rt.extUiQueue.some((candidate) => candidate.id === request.id)
+			) {
+				return rt;
+			}
 			return rt.pendingExtUi
 				? { ...rt, extUiQueue: [...rt.extUiQueue, request] }
 				: { ...rt, pendingExtUi: request };
@@ -745,7 +796,31 @@ function reduceExtUi(
 	}
 }
 
+function withHostState(runtime: SessionRuntime, hostState: SessionState | null): SessionRuntime {
+	let next = runtime.hostState === hostState ? runtime : { ...runtime, hostState };
+	const dialogId =
+		hostState?.needsInput?.kind === "dialog" ? hostState.needsInput.request.id : null;
+	if (dialogId === null) {
+		if (!next.pendingExtUi && next.extUiQueue.length === 0) return next;
+		return { ...next, pendingExtUi: null, extUiQueue: [] };
+	}
+	while (next.pendingExtUi && next.pendingExtUi.id !== dialogId) {
+		next = reduceExtUi(next, {
+			id: next.pendingExtUi.id,
+			sessionId: next.pendingExtUi.sessionId,
+			kind: "dismiss",
+		});
+	}
+	return next;
+}
+
 interface AppState {
+	resourceSnapshots: ChatResourceSnapshots;
+	resourceRevision: number;
+	invalidateChatResources: (scope: ChatResourceScope) => void;
+	installChatResources: (read: ChatResourceRead, snapshot: SessionResources) => void;
+	failChatResources: (read: ChatResourceRead, error: string) => void;
+	clearChatResources: (scope: ChatResourceScope) => void;
 	status: ConnectionStatus;
 	connectionGeneration: number;
 	welcomeGeneration: number;
@@ -760,6 +835,7 @@ interface AppState {
 	selectedProjectId: string | null;
 	activeWorkspaceId: string | null;
 	workspaceSelectionHistory: string[];
+	pendingWorkspaceChatActivation: string | null;
 	routeChatTarget: RouteChatTarget | null;
 	routeChatTargetGeneration: number;
 	workbenchFrame: WorkbenchFrame | null;
@@ -768,7 +844,7 @@ interface AppState {
 	localLayoutPreferences: LocalLayoutPreferences;
 	layoutDocumentsByWorkspace: Record<string, WorkspaceLayoutDocument>;
 	layoutAttentionByWorkspace: Record<string, LayoutAttention>;
-	layoutProjectionEpochByWorkspace: Record<string, number>;
+	layoutProjectionEpoch: number;
 	layoutIntents: LayoutIntent[];
 	tabsByWorkspace: Record<string, EditorTab[]>;
 	activeTabByWorkspace: Record<string, string | null>;
@@ -778,10 +854,18 @@ interface AppState {
 	chatStartsByWorkspace: Record<string, number>;
 	worktreeCreationsByProject: Record<string, number>;
 	deletedSessionsByWorkspace: Record<string, Record<string, true>>;
-	activityByWorkspace: Record<string, WorkspaceActivity>;
 	terminalsByWorkspace: Record<string, TerminalTab[]>;
 	activeTerminalByWorkspace: Record<string, string | null>;
 	sessions: Record<string, SessionRuntime>;
+	sessionStateByWorkspace: Record<string, Record<string, SessionStateRecord>>;
+	sessionStateClock: number;
+	sessionStateTickBySession: Record<string, number>;
+	sessionStateSnapshotInstalled: boolean;
+	directChatActivationTickBySession: Record<string, number>;
+	directActivatedCompletionBySession: Record<string, string>;
+	pendingDirectChatActivationBySession: Record<string, true>;
+	renderedCompletionBySession: Record<string, string>;
+	obscuredChatSessions: Record<string, true>;
 	extUiOrphans: ExtUiRequest[];
 	models: WireModel[];
 	providerVersion: number;
@@ -828,9 +912,14 @@ interface AppState {
 	fileLineWidthBounded: boolean;
 	chatMessageOrder: ChatMessageOrder;
 	streamingResponseMovement: StreamingResponseMovement;
+	defaultModel: WireModel | undefined;
+	defaultEffort: ThinkingLevel | undefined;
 	reviewModel: WireModel | undefined;
 	reviewEffort: ThinkingLevel | undefined;
+	favoriteModels: WireModel[];
+	recentModels: WireModel[];
 	reviewAutoFix: boolean;
+	agentReviewEnabled: boolean;
 	customLayoutPresets: LayoutPreset[];
 	toasts: Toast[];
 
@@ -868,7 +957,6 @@ interface AppState {
 	applyHubMessageReceived: (message: HubMessage) => void;
 	applyHubAccountStatusChanged: (payload: HubAccountStatusChangedPayload) => void;
 	applyHubSyncStatus: (payload: HubSyncStatusPayload) => void;
-
 	setStatus: (status: ConnectionStatus) => void;
 	installWelcomeSnapshot: (
 		protocolVersion: number,
@@ -892,6 +980,7 @@ interface AppState {
 	hydrateExpandedProjects: (projectIds: readonly string[]) => void;
 	selectMain: () => void;
 	activateWorkspace: (workspace: Pick<Workspace, "id" | "projectId">) => void;
+	consumeWorkspaceChatActivation: (workspaceId: string) => void;
 	activateWorkspaceFromRoute: (
 		workspace: Pick<Workspace, "id" | "projectId">,
 		sessionId?: string,
@@ -899,11 +988,7 @@ interface AppState {
 	validateRouteChatTarget: (sessionId: string) => void;
 	clearRouteChatTarget: () => void;
 	hydrateLocalLayoutState: (payload: LocalLayoutStatePayload) => void;
-	applyLocalLayoutState: (
-		payload: LocalLayoutStatePayload,
-		changedWorkspaceIds: readonly string[],
-		invalidateProjection?: boolean,
-	) => void;
+	applyLocalLayoutState: (payload: LocalLayoutStatePayload, invalidateProjection?: boolean) => void;
 	setLocalLayoutPreferences: (preferences: LocalLayoutPreferences) => void;
 	setLayoutAttention: (workspaceId: string, attention: LayoutAttention) => void;
 	syncLegacySelection: (
@@ -931,9 +1016,9 @@ interface AppState {
 		preferredGroupId?: string,
 	) => CenterNavigationStamp | null;
 	noteNavigation: (workspaceId: string) => void;
-	setFileTabView: (id: string, view: "rendered" | "source") => void;
+	setTabRenderer: (workspaceId: string, id: string, rendererId: string) => void;
+	setTabViewState: (workspaceId: string, id: string, viewState: unknown) => void;
 	setDiffTabView: (id: string, view: DiffTabView) => void;
-	setDiffTabRendered: (id: string, rendered: boolean) => void;
 	setDiffTabIgnoreWhitespace: (id: string, ignoreWhitespace: boolean) => void;
 	changesView: "list" | "tree";
 	setChangesView: (view: "list" | "tree") => void;
@@ -941,12 +1026,20 @@ interface AppState {
 	setDiffScope: (workspaceId: string, scope: GitDiffScope) => void;
 	noteFsChanged: (payload: WorkspaceFsChangedPayload) => void;
 	markSkillsSynced: (sessionId: string, syncedTick: number) => void;
-	updateFileTabContent: (workspaceId: string, id: string, content: string, tick: number) => void;
+	updateFileTabContent: (
+		workspaceId: string,
+		id: string,
+		content: string,
+		meta: ResourceMeta | undefined,
+		tick: number,
+	) => void;
 	updateDiffTabContent: (
 		workspaceId: string,
 		id: string,
 		original: string,
 		modified: string,
+		meta: { original: ResourceMeta; modified: ResourceMeta } | undefined,
+		originalOid: string | null | undefined,
 		tick: number,
 		loadedTarget: string,
 	) => void;
@@ -990,6 +1083,11 @@ interface AppState {
 		baselineSessionIds: readonly string[],
 		authoritativeSessionIds: readonly string[],
 	) => void;
+	installSessionStateSnapshot: (records: readonly SessionStateRecord[]) => void;
+	applySessionState: (record: SessionStateRecord) => void;
+	noteDirectChatActivation: (sessionId: string) => void;
+	noteRenderedCompletion: (sessionId: string, completionId: string) => void;
+	setChatObscured: (sessionId: string, obscured: boolean) => void;
 	reopenChat: (workspaceId: string, sessionId: string, options?: LayoutOpenOptions) => void;
 	restorePlacedChatCache: (
 		workspaceId: string,
@@ -998,8 +1096,6 @@ interface AppState {
 		title: string,
 	) => void;
 	noteClosedChats: (workspaceId: string, entries: ClosedChat[]) => void;
-	hydrateSessionActivity: (rows: SessionActivity[]) => void;
-	applySessionActivity: (payload: SessionActivityPayload) => void;
 	hydrateSession: (
 		summary: SessionSummary,
 		hydrated: HydratedRuntime,
@@ -1107,9 +1203,14 @@ function configPatch(config: AppConfig) {
 				? config.fileLineWidthBounded
 				: DEFAULT_CONFIG.fileLineWidthBounded,
 		customLayoutPresets: config.customLayoutPresets ?? DEFAULT_CONFIG.customLayoutPresets,
+		defaultModel: config.defaultModel,
+		defaultEffort: config.defaultEffort,
 		reviewModel: config.reviewModel,
 		reviewEffort: config.reviewEffort,
+		favoriteModels: config.favoriteModels ?? DEFAULT_CONFIG.favoriteModels,
+		recentModels: config.recentModels ?? DEFAULT_CONFIG.recentModels,
 		reviewAutoFix: config.reviewAutoFix ?? DEFAULT_CONFIG.reviewAutoFix,
+		agentReviewEnabled: config.agentReviewEnabled ?? DEFAULT_CONFIG.agentReviewEnabled,
 	};
 }
 
@@ -1130,6 +1231,20 @@ function withWorkspaceSelected(history: string[], workspaceId: string): string[]
 	return history[0] === workspaceId
 		? history
 		: [workspaceId, ...history.filter((id) => id !== workspaceId)];
+}
+
+function workspaceActivationPatch(
+	state: Pick<AppState, "removedWorkspaceIds" | "workspaceSelectionHistory">,
+	workspace: Pick<Workspace, "id" | "projectId">,
+):
+	| Pick<AppState, "selectedProjectId" | "activeWorkspaceId" | "workspaceSelectionHistory">
+	| Record<string, never> {
+	if (state.removedWorkspaceIds[workspace.id]) return {};
+	return {
+		selectedProjectId: workspace.projectId,
+		activeWorkspaceId: workspace.id,
+		workspaceSelectionHistory: withWorkspaceSelected(state.workspaceSelectionHistory, workspace.id),
+	};
 }
 
 function recentWorkspaceFallback(
@@ -1167,49 +1282,21 @@ function pruneExpandedProjects(
 function reconcileProjectNavigation(
 	state: Pick<AppState, "selectedProjectId" | "activeWorkspaceId" | "workspaces">,
 	projects: Project[],
-): Pick<AppState, "selectedProjectId" | "activeWorkspaceId"> | Record<string, never> {
+):
+	| Pick<AppState, "selectedProjectId" | "activeWorkspaceId" | "pendingWorkspaceChatActivation">
+	| Record<string, never> {
 	const currentProjectId = selectActiveWorkspaceProjectId(state) ?? state.selectedProjectId;
 	if (!currentProjectId || projects.some((project) => project.id === currentProjectId)) return {};
-	return { selectedProjectId: projects[0]?.id ?? null, activeWorkspaceId: null };
+	return {
+		selectedProjectId: projects[0]?.id ?? null,
+		activeWorkspaceId: null,
+		pendingWorkspaceChatActivation: null,
+	};
 }
 
 function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
 	const { [key]: _dropped, ...rest } = record;
 	return rest;
-}
-
-function sameActivityMap(
-	prev: Record<string, WorkspaceActivity>,
-	next: Record<string, WorkspaceActivity>,
-): boolean {
-	const prevKeys = Object.keys(prev);
-	if (prevKeys.length !== Object.keys(next).length) return false;
-	return prevKeys.every((workspaceId) => {
-		const before = prev[workspaceId];
-		const after = next[workspaceId];
-		if (!before || !after || before.projectId !== after.projectId) return false;
-		const sessionIds = Object.keys(before.sessions);
-		return (
-			sessionIds.length === Object.keys(after.sessions).length &&
-			sessionIds.every((sessionId) => before.sessions[sessionId] === after.sessions[sessionId])
-		);
-	});
-}
-
-function withoutSessionActivity(
-	s: AppState,
-	workspaceId: string,
-	sessionId: string,
-): Pick<AppState, "activityByWorkspace"> {
-	const current = s.activityByWorkspace[workspaceId];
-	if (!current) return { activityByWorkspace: s.activityByWorkspace };
-	const sessions = omitKey(current.sessions, sessionId);
-	return {
-		activityByWorkspace:
-			Object.keys(sessions).length === 0
-				? omitKey(s.activityByWorkspace, workspaceId)
-				: { ...s.activityByWorkspace, [workspaceId]: { ...current, sessions } },
-	};
 }
 
 function appendLayoutIntent(intents: LayoutIntent[], input: LayoutIntentInput): LayoutIntent[] {
@@ -1236,6 +1323,26 @@ function isSessionDeleted(
 	sessionId: string,
 ): boolean {
 	return state.deletedSessionsByWorkspace[workspaceId]?.[sessionId] === true;
+}
+
+function patchResourceTab(
+	state: Pick<AppState, "tabsByWorkspace">,
+	workspaceId: string,
+	id: string,
+	patch: (tab: FileTab | DiffTab) => FileTab | DiffTab,
+): Partial<AppState> {
+	const tabs = state.tabsByWorkspace[workspaceId] ?? [];
+	if (!tabs.some((tab) => tab.id === id && (tab.kind === "file" || tab.kind === "diff"))) {
+		return {};
+	}
+	return {
+		tabsByWorkspace: {
+			...state.tabsByWorkspace,
+			[workspaceId]: tabs.map((tab) =>
+				tab.id === id && (tab.kind === "file" || tab.kind === "diff") ? patch(tab) : tab,
+			),
+		},
+	};
 }
 
 function patchDiffTab(
@@ -1410,8 +1517,15 @@ function withoutChat(
 	const closed = s.closedChatsByWorkspace[workspaceId] ?? [];
 	const inHistory = closed.some((chat) => chat.sessionId === sessionId);
 	const hasRuntime = s.sessions[sessionId] !== undefined;
+	const hasResources = s.resourceSnapshots[workspaceId]?.[sessionId] !== undefined;
+	const hasHostState = s.sessionStateByWorkspace[workspaceId]?.[sessionId] !== undefined;
+	const hasStateTick = Object.hasOwn(s.sessionStateTickBySession, sessionId);
+	const hasActivationTick = Object.hasOwn(s.directChatActivationTickBySession, sessionId);
+	const hasActivatedCompletion = Object.hasOwn(s.directActivatedCompletionBySession, sessionId);
+	const hasPendingActivation = Object.hasOwn(s.pendingDirectChatActivationBySession, sessionId);
+	const hasRenderedCompletion = Object.hasOwn(s.renderedCompletionBySession, sessionId);
+	const isObscured = Boolean(s.obscuredChatSessions[sessionId]);
 	const hasSkillBaseline = Object.hasOwn(s.skillsSyncedTickBySession, sessionId);
-	const hasActivity = s.activityByWorkspace[workspaceId]?.sessions[sessionId] !== undefined;
 	const targetsLocation =
 		s.chatLocationRequest?.workspaceId === workspaceId &&
 		s.chatLocationRequest.sessionId === sessionId;
@@ -1424,9 +1538,16 @@ function withoutChat(
 	if (
 		alreadyDeleted &&
 		sessionTabs.length === 0 &&
-		!hasActivity &&
 		!inHistory &&
 		!hasRuntime &&
+		!hasResources &&
+		!hasHostState &&
+		!hasStateTick &&
+		!hasActivationTick &&
+		!hasActivatedCompletion &&
+		!hasPendingActivation &&
+		!hasRenderedCompletion &&
+		!isObscured &&
 		!hasSkillBaseline &&
 		!targetsLocation &&
 		!targetsRoute &&
@@ -1492,7 +1613,53 @@ function withoutChat(
 				}
 			: {}),
 		...(hasRuntime ? { sessions: omitKey(s.sessions, sessionId) } : {}),
-		...(hasActivity ? withoutSessionActivity(s, workspaceId, sessionId) : {}),
+		...(hasResources
+			? {
+					resourceSnapshots: {
+						...s.resourceSnapshots,
+						[workspaceId]: omitKey(s.resourceSnapshots[workspaceId] ?? {}, sessionId),
+					},
+				}
+			: {}),
+		...(hasHostState
+			? {
+					sessionStateByWorkspace: {
+						...s.sessionStateByWorkspace,
+						[workspaceId]: omitKey(s.sessionStateByWorkspace[workspaceId] ?? {}, sessionId),
+					},
+				}
+			: {}),
+		...(hasStateTick
+			? { sessionStateTickBySession: omitKey(s.sessionStateTickBySession, sessionId) }
+			: {}),
+		...(hasActivationTick
+			? {
+					directChatActivationTickBySession: omitKey(
+						s.directChatActivationTickBySession,
+						sessionId,
+					),
+				}
+			: {}),
+		...(hasActivatedCompletion
+			? {
+					directActivatedCompletionBySession: omitKey(
+						s.directActivatedCompletionBySession,
+						sessionId,
+					),
+				}
+			: {}),
+		...(hasPendingActivation
+			? {
+					pendingDirectChatActivationBySession: omitKey(
+						s.pendingDirectChatActivationBySession,
+						sessionId,
+					),
+				}
+			: {}),
+		...(hasRenderedCompletion
+			? { renderedCompletionBySession: omitKey(s.renderedCompletionBySession, sessionId) }
+			: {}),
+		...(isObscured ? { obscuredChatSessions: omitKey(s.obscuredChatSessions, sessionId) } : {}),
 		...(hasSkillBaseline
 			? { skillsSyncedTickBySession: omitKey(s.skillsSyncedTickBySession, sessionId) }
 			: {}),
@@ -1514,6 +1681,13 @@ function sameReviewSnapshot(prev: ReviewSnapshot | undefined, next: ReviewSnapsh
 	return prev !== undefined && JSON.stringify(prev) === JSON.stringify(next);
 }
 
+function sameSessionStateRecord(
+	previous: SessionStateRecord | undefined,
+	next: SessionStateRecord,
+): boolean {
+	return previous !== undefined && JSON.stringify(previous) === JSON.stringify(next);
+}
+
 const EXT_UI_ORPHAN_LIMIT = 64;
 const REPLAYABLE_EXT_UI: ReadonlySet<ExtUiRequest["kind"]> = new Set([
 	"notify",
@@ -1522,10 +1696,35 @@ const REPLAYABLE_EXT_UI: ReadonlySet<ExtUiRequest["kind"]> = new Set([
 	"setTitle",
 ]);
 
+function isDialogRequest(
+	request: ExtUiRequest,
+): request is Extract<ExtUiRequest, { kind: "select" | "confirm" | "input" | "editor" }> {
+	return (
+		request.kind === "select" ||
+		request.kind === "confirm" ||
+		request.kind === "input" ||
+		request.kind === "editor"
+	);
+}
+
+function dialogIsAuthorized(
+	state: SessionState | null | undefined,
+	request: ExtUiRequest,
+): boolean {
+	return (
+		isDialogRequest(request) &&
+		state?.needsInput?.kind === "dialog" &&
+		state.needsInput.request.id === request.id
+	);
+}
+
 function bufferExtUiOrphan(s: AppState, request: ExtUiRequest): Partial<AppState> {
-	return REPLAYABLE_EXT_UI.has(request.kind)
-		? { extUiOrphans: [...s.extUiOrphans, request].slice(-EXT_UI_ORPHAN_LIMIT) }
-		: {};
+	const stateAuthorizesDialog = Object.values(s.sessionStateByWorkspace).some((records) =>
+		dialogIsAuthorized(records[request.sessionId]?.state, request),
+	);
+	if (!REPLAYABLE_EXT_UI.has(request.kind) && !stateAuthorizesDialog) return {};
+	if (s.extUiOrphans.some((frame) => frame.id === request.id)) return {};
+	return { extUiOrphans: [...s.extUiOrphans, request].slice(-EXT_UI_ORPHAN_LIMIT) };
 }
 
 function replayExtUiOrphans(
@@ -1534,8 +1733,14 @@ function replayExtUiOrphans(
 	get: () => AppState,
 ): void {
 	if (!get().sessions[sessionId]) return;
-	const replay = get().extUiOrphans.filter((frame) => frame.sessionId === sessionId);
-	if (replay.length === 0) return;
+	const state = Object.values(get().sessionStateByWorkspace).find(
+		(records) => records[sessionId] !== undefined,
+	)?.[sessionId]?.state;
+	const sessionFrames = get().extUiOrphans.filter((frame) => frame.sessionId === sessionId);
+	if (sessionFrames.length === 0) return;
+	const replay = sessionFrames.filter(
+		(frame) => !isDialogRequest(frame) || dialogIsAuthorized(state, frame),
+	);
 	set((s) => ({ extUiOrphans: s.extUiOrphans.filter((frame) => frame.sessionId !== sessionId) }));
 	for (const frame of replay) get().applyExtUi(frame);
 }
@@ -1692,11 +1897,11 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 			[HUB_PROJECT_ID]: [HUB_WORKSPACE],
 		},
 		removedWorkspaceIds: Object.create(null) as Record<string, true>,
-		activityByWorkspace: Object.create(null) as Record<string, WorkspaceActivity>,
 		expandedProjectIds: Object.create(null) as Record<string, true>,
 		selectedProjectId: null,
 		activeWorkspaceId: null,
 		workspaceSelectionHistory: [],
+		pendingWorkspaceChatActivation: null,
 		routeChatTarget: null,
 		routeChatTargetGeneration: 0,
 		workbenchFrame: null,
@@ -1705,7 +1910,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		localLayoutPreferences: { ...DEFAULT_LOCAL_LAYOUT_PREFERENCES },
 		layoutDocumentsByWorkspace: {},
 		layoutAttentionByWorkspace: {},
-		layoutProjectionEpochByWorkspace: {},
+		layoutProjectionEpoch: 0,
 		layoutIntents: [],
 		tabsByWorkspace: {},
 		activeTabByWorkspace: {},
@@ -1718,6 +1923,15 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		terminalsByWorkspace: {},
 		activeTerminalByWorkspace: {},
 		sessions: {},
+		sessionStateByWorkspace: {},
+		sessionStateClock: 0,
+		sessionStateTickBySession: {},
+		sessionStateSnapshotInstalled: false,
+		directChatActivationTickBySession: {},
+		directActivatedCompletionBySession: {},
+		pendingDirectChatActivationBySession: {},
+		renderedCompletionBySession: {},
+		obscuredChatSessions: {},
 		extUiOrphans: [],
 		models: [],
 		providerVersion: 0,
@@ -1758,9 +1972,14 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		chatMessageOrder: "oldest-first",
 		streamingResponseMovement: { ...DEFAULT_STREAMING_RESPONSE_MOVEMENT },
 		customLayoutPresets: DEFAULT_CONFIG.customLayoutPresets,
+		defaultModel: DEFAULT_CONFIG.defaultModel,
+		defaultEffort: DEFAULT_CONFIG.defaultEffort,
 		reviewModel: DEFAULT_CONFIG.reviewModel,
 		reviewEffort: DEFAULT_CONFIG.reviewEffort,
+		favoriteModels: DEFAULT_CONFIG.favoriteModels,
+		recentModels: DEFAULT_CONFIG.recentModels,
 		reviewAutoFix: DEFAULT_CONFIG.reviewAutoFix,
+		agentReviewEnabled: DEFAULT_CONFIG.agentReviewEnabled,
 		toasts: [],
 
 		// Hub initial state
@@ -1779,120 +1998,93 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		hubAssistantSessionId: null,
 		hubAssistantWorkspaceId: null,
 
-		// Hub actions
-		setViewMode: (viewMode) => set({ viewMode }),
-		setHubActiveTab: (hubActiveTab) => set({ hubActiveTab }),
-		setHubAccounts: (hubAccounts) => set({ hubAccounts }),
-		setHubDashboard: (hubDashboard) => set({ hubDashboard }),
-		setHubMessages: (hubMessages) => set({ hubMessages }),
-		setHubChannels: (hubChannels) => set({ hubChannels }),
-		setHubFilter: (filter) => set((state) => ({ hubFilter: { ...state.hubFilter, ...filter } })),
-		setHubViewPreference: (tab, pref) =>
-			set((state) => ({ hubViewPreference: { ...state.hubViewPreference, [tab]: pref } })),
-		setHubLoading: (hubLoading) => set({ hubLoading }),
-		setHubSyncing: (hubSyncing) => set({ hubSyncing }),
-		setHubError: (hubError) => set({ hubError }),
-		setHubAssistantSidebarOpen: (hubAssistantSidebarOpen) => set({ hubAssistantSidebarOpen }),
-		toggleHubAssistantSidebar: () =>
-			set((state) => ({ hubAssistantSidebarOpen: !state.hubAssistantSidebarOpen })),
-		setHubAssistantSession: (workspaceId, sessionId) =>
-			set({ hubAssistantWorkspaceId: workspaceId, hubAssistantSessionId: sessionId }),
-		applyHubMessageReceived: (message) =>
+		resourceSnapshots: {},
+		resourceRevision: 0,
+		invalidateChatResources: (scope) =>
 			set((state) => {
-				const existingIndex = state.hubMessages.findIndex((m) => m.id === message.id);
-				const hubMessages =
-					existingIndex >= 0
-						? state.hubMessages.map((m, idx) => (idx === existingIndex ? message : m))
-						: [message, ...state.hubMessages];
-
-				const isNewUnread = existingIndex < 0 && !message.isRead;
-				const hubAccounts = state.hubAccounts.map((acc) => {
-					if (acc.id === message.accountId && isNewUnread) {
-						return { ...acc, unreadCount: acc.unreadCount + 1 };
-					}
-					return acc;
-				});
-
-				let hubDashboard = state.hubDashboard;
-				if (hubDashboard) {
-					const accounts = hubDashboard.accounts.map((acc) => {
-						if (acc.id === message.accountId && isNewUnread) {
-							return { ...acc, unreadCount: acc.unreadCount + 1 };
-						}
-						return acc;
-					});
-					const recentActivity = [
-						message,
-						...hubDashboard.recentActivity.filter((m) => m.id !== message.id),
-					].slice(0, 50);
-					const urgentMessages = message.isUrgent
-						? [message, ...hubDashboard.urgentMessages.filter((m) => m.id !== message.id)].slice(
-								0,
-								50,
-							)
-						: hubDashboard.urgentMessages;
-					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
-					hubDashboard = {
-						...hubDashboard,
-						totalUnread,
-						accounts,
-						recentActivity,
-						urgentMessages,
-					};
-				}
-
-				return { hubMessages, hubAccounts, hubDashboard };
+				if (
+					!isChatResourceScopeAlive(state, scope) ||
+					!supportsChatResources(state.protocolVersion) ||
+					state.status !== "connected"
+				)
+					return {};
+				const previous = state.resourceSnapshots[scope.workspaceId]?.[scope.sessionId];
+				const revision = state.resourceRevision + 1;
+				return {
+					resourceRevision: revision,
+					resourceSnapshots: {
+						...state.resourceSnapshots,
+						[scope.workspaceId]: {
+							...state.resourceSnapshots[scope.workspaceId],
+							[scope.sessionId]: {
+								snapshot: previous?.snapshot ?? null,
+								connectionGeneration: previous?.connectionGeneration ?? null,
+								revision,
+								fresh: false,
+								error: null,
+							},
+						},
+					},
+				};
 			}),
-		applyHubAccountStatusChanged: (payload) =>
+		installChatResources: (read, snapshot) =>
 			set((state) => {
-				const hubAccounts = state.hubAccounts.map((acc) => {
-					if (acc.id === payload.accountId) {
-						const updated: HubAccount = {
-							...acc,
-							status: payload.status,
-							unreadCount: payload.unreadCount,
-							...(payload.metadata !== undefined
-								? { metadata: { ...acc.metadata, ...payload.metadata } }
-								: {}),
-						};
-						if (payload.error !== undefined) {
-							updated.error = payload.error;
-						} else {
-							delete updated.error;
-						}
-						return updated;
-					}
-					return acc;
-				});
-				let hubDashboard = state.hubDashboard;
-				if (hubDashboard) {
-					const accounts = hubDashboard.accounts.map((acc) => {
-						if (acc.id === payload.accountId) {
-							return {
-								...acc,
-								status: payload.status,
-								unreadCount: payload.unreadCount,
-							};
-						}
-						return acc;
-					});
-					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
-					hubDashboard = { ...hubDashboard, accounts, totalUnread };
-				}
-				return { hubAccounts, hubDashboard };
+				if (
+					!isChatResourceReadCurrent(state, read) ||
+					snapshot.workspaceId !== read.workspaceId ||
+					snapshot.sessionId !== read.sessionId
+				)
+					return {};
+				return {
+					resourceSnapshots: {
+						...state.resourceSnapshots,
+						[read.workspaceId]: {
+							...state.resourceSnapshots[read.workspaceId],
+							[read.sessionId]: {
+								snapshot,
+								connectionGeneration: read.connectionGeneration,
+								revision: read.revision,
+								fresh: true,
+								error: null,
+							},
+						},
+					},
+				};
 			}),
-		applyHubSyncStatus: (payload) =>
+		failChatResources: (read, error) =>
+			set((state) => {
+				const previous = state.resourceSnapshots[read.workspaceId]?.[read.sessionId];
+				if (!previous || !isChatResourceReadCurrent(state, read)) return {};
+				return {
+					resourceSnapshots: {
+						...state.resourceSnapshots,
+						[read.workspaceId]: {
+							...state.resourceSnapshots[read.workspaceId],
+							[read.sessionId]: { ...previous, fresh: false, error },
+						},
+					},
+				};
+			}),
+		clearChatResources: (scope) =>
 			set((state) => ({
-				hubSyncing: payload.isSyncing,
-				hubError: payload.error ?? (payload.isSyncing ? state.hubError : null),
+				resourceSnapshots: {
+					...state.resourceSnapshots,
+					[scope.workspaceId]: omitKey(
+						state.resourceSnapshots[scope.workspaceId] ?? {},
+						scope.sessionId,
+					),
+				},
 			})),
-
 		setStatus: (status) =>
 			set((state) => ({
 				status,
 				protocolVersion: null,
+				resourceSnapshots: staleChatResources(state.resourceSnapshots),
 				connectionGeneration:
 					status === "connected" ? state.connectionGeneration + 1 : state.connectionGeneration,
+				pendingWorkspaceChatActivation: null,
+				sessionStateSnapshotInstalled: false,
+				pendingDirectChatActivationBySession: {},
 			})),
 		installWelcomeSnapshot: (
 			protocolVersion,
@@ -1906,6 +2098,9 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 				const openProjects = sortProjects(projects.filter((project) => project.closed !== true));
 				return {
 					protocolVersion,
+					resourceSnapshots: supportsChatResources(protocolVersion)
+						? staleChatResources(state.resourceSnapshots)
+						: {},
 					projects: openProjects,
 					recentProjects: sortProjects(recentProjects),
 					hostPlatform: hostPlatform ?? null,
@@ -1998,8 +2193,13 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					workspaceSelectionHistory: state.workspaceSelectionHistory.filter(
 						(id) => id !== workspaceId,
 					),
+					pendingWorkspaceChatActivation:
+						state.pendingWorkspaceChatActivation === workspaceId
+							? null
+							: state.pendingWorkspaceChatActivation,
 					fsChangesByWorkspace: omitKey(state.fsChangesByWorkspace, workspaceId),
-					activityByWorkspace: omitKey(state.activityByWorkspace, workspaceId),
+					resourceSnapshots: omitKey(state.resourceSnapshots, workspaceId),
+					sessionStateByWorkspace: omitKey(state.sessionStateByWorkspace, workspaceId),
 					skillChangeTickByWorkspace: omitKey(state.skillChangeTickByWorkspace, workspaceId),
 					specsByWorkspace: omitKey(state.specsByWorkspace, workspaceId),
 					diffScopeByWorkspace: omitKey(state.diffScopeByWorkspace, workspaceId),
@@ -2024,7 +2224,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 			s.removeWorkspace(projectId, workspaceId);
 			s.clearWorkspaceTabs(workspaceId);
 			if (wasActive) {
-				if (fallbackWorkspace) s.activateWorkspace(fallbackWorkspace);
+				if (fallbackWorkspace) set((state) => workspaceActivationPatch(state, fallbackWorkspace));
 				else s.selectProject(projectId);
 				toast.info(`Workspace "${name ?? "?"}" was removed`);
 			}
@@ -2033,6 +2233,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 			set((state) => ({
 				selectedProjectId,
 				activeWorkspaceId: null,
+				pendingWorkspaceChatActivation: null,
 				...(opts?.reveal
 					? { expandedProjectIds: withExpandedProject(state.expandedProjectIds, selectedProjectId) }
 					: {}),
@@ -2053,20 +2254,33 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 				expandedProjectIds: Object.fromEntries(projectIds.map((id) => [id, true as const])),
 			})),
 		selectMain: () =>
-			set({ selectedProjectId: null, activeWorkspaceId: null, routeChatTarget: null }),
-		activateWorkspace: (workspace) =>
-			set((state) =>
-				state.removedWorkspaceIds[workspace.id]
-					? {}
-					: {
-							selectedProjectId: workspace.projectId,
-							activeWorkspaceId: workspace.id,
-							workspaceSelectionHistory: withWorkspaceSelected(
-								state.workspaceSelectionHistory,
-								workspace.id,
-							),
-						},
-			),
+			set({
+				selectedProjectId: null,
+				activeWorkspaceId: null,
+				pendingWorkspaceChatActivation: null,
+				routeChatTarget: null,
+			}),
+		activateWorkspace: (workspace) => {
+			if (get().removedWorkspaceIds[workspace.id]) return;
+			set((state) => ({
+				...workspaceActivationPatch(state, workspace),
+				pendingWorkspaceChatActivation: workspace.id,
+			}));
+			get().consumeWorkspaceChatActivation(workspace.id);
+		},
+		consumeWorkspaceChatActivation: (workspaceId) => {
+			const state = get();
+			if (
+				state.activeWorkspaceId !== workspaceId ||
+				state.pendingWorkspaceChatActivation !== workspaceId
+			) {
+				return;
+			}
+			const active = selectAttentionCenterTab(state, workspaceId);
+			if (!active) return;
+			set({ pendingWorkspaceChatActivation: null });
+			if (active.kind === "chat") get().noteDirectChatActivation(active.sessionId);
+		},
 		activateWorkspaceFromRoute: (workspace, sessionId) =>
 			set((state) => {
 				if (state.removedWorkspaceIds[workspace.id]) return {};
@@ -2075,6 +2289,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					...advanced.patch,
 					selectedProjectId: workspace.projectId,
 					activeWorkspaceId: workspace.id,
+					pendingWorkspaceChatActivation: null,
 					workspaceSelectionHistory: withWorkspaceSelected(
 						state.workspaceSelectionHistory,
 						workspace.id,
@@ -2101,7 +2316,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 			}),
 		clearRouteChatTarget: () =>
 			set((state) => (state.routeChatTarget ? { routeChatTarget: null } : state)),
-		hydrateLocalLayoutState: (payload) =>
+		hydrateLocalLayoutState: (payload) => {
 			set((state) =>
 				state.layoutStateReady
 					? {}
@@ -2113,27 +2328,24 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 							localLayoutPreferences: payload.preferences,
 							layoutStateReady: true,
 						},
-			),
-		applyLocalLayoutState: (payload, changedWorkspaceIds, invalidateProjection = false) =>
-			set((state) => {
-				const layoutProjectionEpochByWorkspace = { ...state.layoutProjectionEpochByWorkspace };
-				if (invalidateProjection) {
-					for (const workspaceId of changedWorkspaceIds) {
-						layoutProjectionEpochByWorkspace[workspaceId] =
-							(layoutProjectionEpochByWorkspace[workspaceId] ?? 0) + 1;
-					}
-				}
-				return {
-					workbenchFrame: payload.frame,
-					workspaceViewsByWorkspace: payload.viewsByWorkspace,
-					layoutDocumentsByWorkspace: payload.documentsByWorkspace,
-					layoutAttentionByWorkspace: payload.attentionByWorkspace,
-					localLayoutPreferences: payload.preferences,
-					layoutProjectionEpochByWorkspace,
-				};
-			}),
+			);
+			const pending = get().pendingWorkspaceChatActivation;
+			if (pending) get().consumeWorkspaceChatActivation(pending);
+		},
+		applyLocalLayoutState: (payload, invalidateProjection = false) => {
+			set((state) => ({
+				workbenchFrame: payload.frame,
+				workspaceViewsByWorkspace: payload.viewsByWorkspace,
+				layoutDocumentsByWorkspace: payload.documentsByWorkspace,
+				layoutAttentionByWorkspace: payload.attentionByWorkspace,
+				localLayoutPreferences: payload.preferences,
+				layoutProjectionEpoch: state.layoutProjectionEpoch + (invalidateProjection ? 1 : 0),
+			}));
+			const pending = get().pendingWorkspaceChatActivation;
+			if (pending) get().consumeWorkspaceChatActivation(pending);
+		},
 		setLocalLayoutPreferences: (preferences) => set({ localLayoutPreferences: preferences }),
-		setLayoutAttention: (workspaceId, attention) =>
+		setLayoutAttention: (workspaceId, attention) => {
 			set((state) =>
 				state.removedWorkspaceIds[workspaceId]
 					? {}
@@ -2143,7 +2355,9 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 								[workspaceId]: attention,
 							},
 						},
-			),
+			);
+			get().consumeWorkspaceChatActivation(workspaceId);
+		},
 		syncLegacySelection: (workspaceId, selection) =>
 			set((state) => {
 				if (state.removedWorkspaceIds[workspaceId]) return {};
@@ -2388,21 +2602,23 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 			set((s) =>
 				s.removedWorkspaceIds[workspaceId] ? {} : { navTickByWorkspace: bumpNav(s, workspaceId) },
 			),
-		setFileTabView: (id, view) =>
-			set((s) => {
-				const wsId = s.activeWorkspaceId;
-				if (!wsId) return {};
-				const tabs = s.tabsByWorkspace[wsId] ?? [];
-				if (!tabs.some((t) => t.id === id && t.kind === "file")) return {};
-				return {
-					tabsByWorkspace: {
-						...s.tabsByWorkspace,
-						[wsId]: tabs.map((t) => (t.id === id && t.kind === "file" ? { ...t, view } : t)),
-					},
-				};
-			}),
+		setTabRenderer: (workspaceId, id, rendererId) =>
+			set((s) =>
+				patchResourceTab(s, workspaceId, id, (tab) => {
+					const next = { ...tab, rendererId };
+					delete next.viewState;
+					return next;
+				}),
+			),
+		setTabViewState: (workspaceId, id, viewState) =>
+			set((s) =>
+				patchResourceTab(s, workspaceId, id, (tab) => {
+					const next = { ...tab, viewState };
+					if (viewState === undefined) delete next.viewState;
+					return next;
+				}),
+			),
 		setDiffTabView: (id, view) => set((s) => patchDiffTab(s, id, { view })),
-		setDiffTabRendered: (id, rendered) => set((s) => patchDiffTab(s, id, { rendered })),
 		setDiffTabIgnoreWhitespace: (id, ignoreWhitespace) =>
 			set((s) => patchDiffTab(s, id, { ignoreWhitespace })),
 		setChangesView: (view) => set({ changesView: view }),
@@ -2441,7 +2657,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					skillsSyncedTickBySession: { ...s.skillsSyncedTickBySession, [sessionId]: synced },
 				};
 			}),
-		updateFileTabContent: (workspaceId, id, content, tick) =>
+		updateFileTabContent: (workspaceId, id, content, meta, tick) =>
 			set((s) => {
 				if (s.removedWorkspaceIds[workspaceId]) return {};
 				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
@@ -2450,12 +2666,28 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					tabsByWorkspace: {
 						...s.tabsByWorkspace,
 						[workspaceId]: tabs.map((tab) =>
-							tab.id === id && tab.kind === "file" ? { ...tab, content, loadedTick: tick } : tab,
+							tab.id === id && tab.kind === "file"
+								? {
+										...tab,
+										content,
+										...(meta === undefined ? {} : { meta }),
+										loadedTick: tick,
+									}
+								: tab,
 						),
 					},
 				};
 			}),
-		updateDiffTabContent: (workspaceId, id, original, modified, tick, loadedTarget) =>
+		updateDiffTabContent: (
+			workspaceId,
+			id,
+			original,
+			modified,
+			meta,
+			originalOid,
+			tick,
+			loadedTarget,
+		) =>
 			set((s) => {
 				if (s.removedWorkspaceIds[workspaceId]) return {};
 				const tabs = s.tabsByWorkspace[workspaceId] ?? [];
@@ -2465,7 +2697,15 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 						...s.tabsByWorkspace,
 						[workspaceId]: tabs.map((tab) =>
 							tab.id === id && tab.kind === "diff"
-								? { ...tab, original, modified, loadedTick: tick, loadedTarget }
+								? {
+										...tab,
+										original,
+										modified,
+										...(meta === undefined ? {} : { meta }),
+										...(originalOid === undefined ? {} : { originalOid }),
+										loadedTick: tick,
+										loadedTarget,
+									}
 								: tab,
 						),
 					},
@@ -2480,13 +2720,10 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					delete skillsSyncedTickBySession[sessionId];
 				}
 				return {
+					resourceSnapshots: omitKey(s.resourceSnapshots, workspaceId),
 					workspaceViewsByWorkspace: omitKey(s.workspaceViewsByWorkspace, workspaceId),
 					layoutDocumentsByWorkspace: omitKey(s.layoutDocumentsByWorkspace, workspaceId),
 					layoutAttentionByWorkspace: omitKey(s.layoutAttentionByWorkspace, workspaceId),
-					layoutProjectionEpochByWorkspace: omitKey(
-						s.layoutProjectionEpochByWorkspace,
-						workspaceId,
-					),
 					layoutIntents: s.layoutIntents.filter((intent) => intent.workspaceId !== workspaceId),
 					tabsByWorkspace: omitKey(s.tabsByWorkspace, workspaceId),
 					activeTabByWorkspace: omitKey(s.activeTabByWorkspace, workspaceId),
@@ -2750,7 +2987,10 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					sessions: fresh
 						? {
 								...s.sessions,
-								[sessionId]: newRuntime(model, thinkingLevel, s.connectionGeneration),
+								[sessionId]: {
+									...newRuntime(model, thinkingLevel, s.connectionGeneration),
+									hostState: s.sessionStateByWorkspace[workspaceId]?.[sessionId]?.state ?? null,
+								},
 							}
 						: s.sessions,
 					...(fresh
@@ -2827,6 +3067,163 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					}
 				}
 				return next;
+			}),
+		installSessionStateSnapshot: (records) =>
+			set((s) => {
+				const sessionStateByWorkspace: Record<string, Record<string, SessionStateRecord>> = {};
+				const stateBySession = new Map<string, SessionState>();
+				for (const record of records) {
+					if (
+						s.removedWorkspaceIds[record.workspaceId] ||
+						isSessionDeleted(s, record.workspaceId, record.sessionId)
+					) {
+						continue;
+					}
+					const workspaceStates = sessionStateByWorkspace[record.workspaceId] ?? {};
+					workspaceStates[record.sessionId] = record;
+					sessionStateByWorkspace[record.workspaceId] = workspaceStates;
+					stateBySession.set(record.sessionId, record.state);
+				}
+				const sessions = Object.fromEntries(
+					Object.entries(s.sessions).map(([sessionId, runtime]) => [
+						sessionId,
+						withHostState(runtime, stateBySession.get(sessionId) ?? null),
+					]),
+				);
+				const extUiOrphans = s.extUiOrphans.filter(
+					(frame) =>
+						!isDialogRequest(frame) ||
+						dialogIsAuthorized(stateBySession.get(frame.sessionId), frame),
+				);
+				const sessionStateClock = s.sessionStateClock + 1;
+				const sessionStateTickBySession = Object.fromEntries(
+					[...stateBySession.keys()].map((sessionId) => [sessionId, sessionStateClock]),
+				);
+				const directActivatedCompletionBySession = {
+					...s.directActivatedCompletionBySession,
+				};
+				for (const sessionId of Object.keys(s.pendingDirectChatActivationBySession)) {
+					const state = stateBySession.get(sessionId);
+					const completionId = state?.completionUnread ? state.completion?.completionId : undefined;
+					if (completionId) directActivatedCompletionBySession[sessionId] = completionId;
+				}
+				return {
+					sessionStateByWorkspace,
+					sessions,
+					extUiOrphans,
+					sessionStateClock,
+					sessionStateTickBySession,
+					sessionStateSnapshotInstalled: true,
+					directActivatedCompletionBySession,
+					pendingDirectChatActivationBySession: {},
+				};
+			}),
+		applySessionState: (record) =>
+			set((s) => {
+				if (
+					s.removedWorkspaceIds[record.workspaceId] ||
+					isSessionDeleted(s, record.workspaceId, record.sessionId)
+				) {
+					return {};
+				}
+				const workspaceStates = s.sessionStateByWorkspace[record.workspaceId] ?? {};
+				const runtime = s.sessions[record.sessionId];
+				const extUiOrphans = s.extUiOrphans.filter(
+					(frame) =>
+						frame.sessionId !== record.sessionId ||
+						!isDialogRequest(frame) ||
+						dialogIsAuthorized(record.state, frame),
+				);
+				const orphansChanged = extUiOrphans.length !== s.extUiOrphans.length;
+				if (sameSessionStateRecord(workspaceStates[record.sessionId], record)) {
+					if ((!runtime || runtime.hostState === record.state) && !orphansChanged) return {};
+					return {
+						...(runtime && runtime.hostState !== record.state
+							? {
+									sessions: {
+										...s.sessions,
+										[record.sessionId]: withHostState(runtime, record.state),
+									},
+								}
+							: {}),
+						...(orphansChanged ? { extUiOrphans } : {}),
+					};
+				}
+				const sessionStateClock = s.sessionStateClock + 1;
+				return {
+					sessionStateClock,
+					sessionStateTickBySession: {
+						...s.sessionStateTickBySession,
+						[record.sessionId]: sessionStateClock,
+					},
+					sessionStateByWorkspace: {
+						...s.sessionStateByWorkspace,
+						[record.workspaceId]: { ...workspaceStates, [record.sessionId]: record },
+					},
+					...(orphansChanged ? { extUiOrphans } : {}),
+					...(runtime
+						? {
+								sessions: {
+									...s.sessions,
+									[record.sessionId]: withHostState(runtime, record.state),
+								},
+							}
+						: {}),
+				};
+			}),
+		noteDirectChatActivation: (sessionId) =>
+			set((s) => {
+				if (s.obscuredChatSessions[sessionId]) return {};
+				const sessionStateClock = s.sessionStateClock + 1;
+				const record = Object.values(s.sessionStateByWorkspace).find(
+					(records) => records[sessionId] !== undefined,
+				)?.[sessionId];
+				const completionId = record?.state.completionUnread
+					? record.state.completion?.completionId
+					: undefined;
+				return {
+					sessionStateClock,
+					directChatActivationTickBySession: {
+						...s.directChatActivationTickBySession,
+						[sessionId]: sessionStateClock,
+					},
+					...(completionId
+						? {
+								directActivatedCompletionBySession: {
+									...s.directActivatedCompletionBySession,
+									[sessionId]: completionId,
+								},
+							}
+						: {}),
+					...(!s.sessionStateSnapshotInstalled
+						? {
+								pendingDirectChatActivationBySession: {
+									...s.pendingDirectChatActivationBySession,
+									[sessionId]: true,
+								},
+							}
+						: {}),
+				};
+			}),
+		noteRenderedCompletion: (sessionId, completionId) =>
+			set((s) => {
+				if (s.sessions[sessionId]?.hostState?.completion?.completionId !== completionId) return {};
+				if (s.renderedCompletionBySession[sessionId] === completionId) return {};
+				return {
+					renderedCompletionBySession: {
+						...s.renderedCompletionBySession,
+						[sessionId]: completionId,
+					},
+				};
+			}),
+		setChatObscured: (sessionId, obscured) =>
+			set((s) => {
+				if (obscured === Boolean(s.obscuredChatSessions[sessionId])) return {};
+				return {
+					obscuredChatSessions: obscured
+						? { ...s.obscuredChatSessions, [sessionId]: true }
+						: omitKey(s.obscuredChatSessions, sessionId),
+				};
 			}),
 		reopenChat: (wsId, sessionId, options = {}) =>
 			set((s) => {
@@ -2927,39 +3324,6 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 							: s.previewTabByWorkspace,
 				};
 			}),
-		hydrateSessionActivity: (rows) =>
-			set((s) => {
-				const next: Record<string, WorkspaceActivity> = Object.create(null);
-				for (const row of rows) {
-					if (s.removedWorkspaceIds[row.workspaceId]) continue;
-					if (isSessionDeleted(s, row.workspaceId, row.sessionId)) continue;
-					const forWorkspace =
-						next[row.workspaceId] ??
-						({ projectId: row.projectId, sessions: Object.create(null) } as WorkspaceActivity);
-					forWorkspace.sessions[row.sessionId] = row.status;
-					next[row.workspaceId] = forWorkspace;
-				}
-				return sameActivityMap(s.activityByWorkspace, next) ? {} : { activityByWorkspace: next };
-			}),
-		applySessionActivity: ({ workspaceId, projectId, sessionId, status }) =>
-			set((s) => {
-				if (s.removedWorkspaceIds[workspaceId]) return {};
-				const current = s.activityByWorkspace[workspaceId];
-				if (status === null || isSessionDeleted(s, workspaceId, sessionId)) {
-					if (current?.sessions[sessionId] === undefined) return {};
-					return withoutSessionActivity(s, workspaceId, sessionId);
-				}
-				if (current?.sessions[sessionId] === status && current.projectId === projectId) return {};
-				return {
-					activityByWorkspace: {
-						...s.activityByWorkspace,
-						[workspaceId]: {
-							projectId,
-							sessions: { ...current?.sessions, [sessionId]: status },
-						},
-					},
-				};
-			}),
 		noteClosedChats: (workspaceId, entries) =>
 			set((s) => {
 				if (s.removedWorkspaceIds[workspaceId]) return {};
@@ -3015,6 +3379,10 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					toolResults: hydrated.toolResults,
 					askAnswers: hydrated.askAnswers,
 					isStreaming: summary.isStreaming,
+					hostState:
+						summary.state ??
+						s.sessionStateByWorkspace[summary.workspaceId]?.[summary.sessionId]?.state ??
+						null,
 					...(summary.queue ? { queue: summary.queue } : {}),
 					...(hydrated.turnIdByMessageIndex
 						? { turnIdByMessageIndex: hydrated.turnIdByMessageIndex }
@@ -3109,6 +3477,10 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					queue: summary.queue ?? EMPTY_QUEUE,
 					model: summary.model,
 					thinkingLevel: summary.thinkingLevel,
+					hostState:
+						summary.state ??
+						s.sessionStateByWorkspace[summary.workspaceId]?.[summary.sessionId]?.state ??
+						current.hostState,
 					eventRevision: current.eventRevision + 1,
 					syncedConnectionGeneration: Math.max(
 						current.syncedConnectionGeneration,
@@ -3332,6 +3704,7 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 					},
 					selectedProjectId: req.projectId,
 					activeWorkspaceId: req.workspaceId,
+					pendingWorkspaceChatActivation: null,
 					workspaceSelectionHistory: withWorkspaceSelected(
 						state.workspaceSelectionHistory,
 						req.workspaceId,
@@ -3436,17 +3809,140 @@ export const useAppStore = create<AppState>((set, get, storeApi) => {
 		pushToast: (toast) => {
 			const twin = get().toasts.find(
 				(t) =>
-					t.variant === toast.variant && t.title === toast.title && t.message === toast.message,
+					!t.action &&
+					!toast.action &&
+					t.variant === toast.variant &&
+					t.title === toast.title &&
+					t.message === toast.message &&
+					t.durationMs === toast.durationMs,
 			);
 			if (twin) return twin.id;
 			const id = crypto.randomUUID();
-			set((s) => ({ toasts: [...s.toasts, { ...toast, id }].slice(-MAX_TOASTS) }));
+			set((s) => {
+				const next = [...s.toasts, { ...toast, id }];
+				let actionlessToDrop = Math.max(0, next.length - MAX_TOASTS);
+				return {
+					toasts: next.filter((candidate) => {
+						if (candidate.action || actionlessToDrop === 0) return true;
+						actionlessToDrop -= 1;
+						return false;
+					}),
+				};
+			});
 			return id;
 		},
 		dismissToast: (id) =>
 			set((s) =>
 				s.toasts.some((t) => t.id === id) ? { toasts: s.toasts.filter((t) => t.id !== id) } : {},
 			),
+
+		// Hub actions
+		setViewMode: (viewMode) => set({ viewMode }),
+		setHubActiveTab: (hubActiveTab) => set({ hubActiveTab }),
+		setHubAccounts: (hubAccounts) => set({ hubAccounts }),
+		setHubDashboard: (hubDashboard) => set({ hubDashboard }),
+		setHubMessages: (hubMessages) => set({ hubMessages }),
+		setHubChannels: (hubChannels) => set({ hubChannels }),
+		setHubFilter: (filter) => set((state) => ({ hubFilter: { ...state.hubFilter, ...filter } })),
+		setHubViewPreference: (tab, pref) =>
+			set((state) => ({ hubViewPreference: { ...state.hubViewPreference, [tab]: pref } })),
+		setHubLoading: (hubLoading) => set({ hubLoading }),
+		setHubSyncing: (hubSyncing) => set({ hubSyncing }),
+		setHubError: (hubError) => set({ hubError }),
+		setHubAssistantSidebarOpen: (hubAssistantSidebarOpen) => set({ hubAssistantSidebarOpen }),
+		toggleHubAssistantSidebar: () =>
+			set((state) => ({ hubAssistantSidebarOpen: !state.hubAssistantSidebarOpen })),
+		setHubAssistantSession: (workspaceId, sessionId) =>
+			set({ hubAssistantWorkspaceId: workspaceId, hubAssistantSessionId: sessionId }),
+		applyHubMessageReceived: (message) =>
+			set((state) => {
+				const existingIndex = state.hubMessages.findIndex((m) => m.id === message.id);
+				const hubMessages =
+					existingIndex >= 0
+						? state.hubMessages.map((m, idx) => (idx === existingIndex ? message : m))
+						: [message, ...state.hubMessages];
+
+				const isNewUnread = existingIndex < 0 && !message.isRead;
+				const hubAccounts = state.hubAccounts.map((acc) => {
+					if (acc.id === message.accountId && isNewUnread) {
+						return { ...acc, unreadCount: acc.unreadCount + 1 };
+					}
+					return acc;
+				});
+
+				let hubDashboard = state.hubDashboard;
+				if (hubDashboard) {
+					const accounts = hubDashboard.accounts.map((acc) => {
+						if (acc.id === message.accountId && isNewUnread) {
+							return { ...acc, unreadCount: acc.unreadCount + 1 };
+						}
+						return acc;
+					});
+					const recentActivity = [
+						message,
+						...hubDashboard.recentActivity.filter((m) => m.id !== message.id),
+					].slice(0, 50);
+					const urgentMessages = message.isUrgent
+						? [message, ...hubDashboard.urgentMessages.filter((m) => m.id !== message.id)].slice(
+								0,
+								50,
+							)
+						: hubDashboard.urgentMessages;
+					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
+					hubDashboard = {
+						...hubDashboard,
+						totalUnread,
+						accounts,
+						recentActivity,
+						urgentMessages,
+					};
+				}
+
+				return { hubMessages, hubAccounts, hubDashboard };
+			}),
+		applyHubAccountStatusChanged: (payload) =>
+			set((state) => {
+				const hubAccounts = state.hubAccounts.map((acc) => {
+					if (acc.id === payload.accountId) {
+						const updated: HubAccount = {
+							...acc,
+							status: payload.status,
+							unreadCount: payload.unreadCount,
+							...(payload.metadata !== undefined
+								? { metadata: { ...acc.metadata, ...payload.metadata } }
+								: {}),
+						};
+						if (payload.error !== undefined) {
+							updated.error = payload.error;
+						} else {
+							delete updated.error;
+						}
+						return updated;
+					}
+					return acc;
+				});
+				let hubDashboard = state.hubDashboard;
+				if (hubDashboard) {
+					const accounts = hubDashboard.accounts.map((acc) => {
+						if (acc.id === payload.accountId) {
+							return {
+								...acc,
+								status: payload.status,
+								unreadCount: payload.unreadCount,
+							};
+						}
+						return acc;
+					});
+					const totalUnread = accounts.reduce((sum, a) => sum + (a.unreadCount || 0), 0);
+					hubDashboard = { ...hubDashboard, accounts, totalUnread };
+				}
+				return { hubAccounts, hubDashboard };
+			}),
+		applyHubSyncStatus: (payload) =>
+			set((state) => ({
+				hubSyncing: payload.isSyncing,
+				hubError: payload.error ?? (payload.isSyncing ? state.hubError : null),
+			})),
 	};
 });
 

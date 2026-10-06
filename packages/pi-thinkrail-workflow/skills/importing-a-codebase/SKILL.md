@@ -54,9 +54,9 @@ re-deriving from code.
 ## 3. Interview only the gaps
 
 Ask **only** what the files can't answer and that would change a spec — typically: the primary job / who
-it's for, explicit non-goals, and the *why* behind a non-obvious decision. Batch them per the
-**asking-user-questions** concept skill; infer a concrete answer and let the user correct it rather
-than asking open-ended.
+it's for, explicit non-goals, and the *why* behind a non-obvious decision. Interview them in rounds
+per the **asking-user-questions** concept skill; infer a concrete answer and let the user correct it
+rather than asking open-ended.
 
 If adoption candidates exist, add one question to the same round: a multiSelect listing them (grouped
 when many — an `adr/` set is one option) — which should become spec-graph nodes? A contradiction
@@ -71,7 +71,8 @@ A skipped/declined question is not a blocker: record the assumption inline in th
 
 Save with the spec tools as you go (`spec_create` per node, `edit` for prose). Order:
 
-1. **`goal-and-requirements.md`** (`type: goal-and-requirements`) — the goal + scope. This is the graph
+1. **`goal-and-requirements.md`** (`type: goal-and-requirements`) — what the product is and why, in the
+   goal-doc shape `writing-specs` sets; capabilities are what the code already does. This is the graph
    root; the confirmed intent lives here.
 2. **`architecture.md`** (`type: architecture-design`, `parent: <goal id>`) — topology, the module
    boundaries, the real dependency edges (a small DAG only if it carries real information), and the

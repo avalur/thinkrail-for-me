@@ -7,7 +7,7 @@ export {
 } from "./diffScope";
 export {
 	canonicalPath,
-	countUnpushedCommits,
+	countPushDivergence,
 	currentBranch,
 	gitCommitPaths,
 	gitDiffFile,
@@ -16,14 +16,20 @@ export {
 	gitUncommittedPaths,
 	listBranches,
 	listCommits,
+	listCommitsSince,
 	listRemotes,
 	prefetchBranch,
 	readBlobAt,
+	readBlobBytesAt,
+	readBlobBytesAtAsync,
+	readBlobSizeAtAsync,
+	readBlobStreamAtAsync,
 	readCommitSubject,
+	readPathModeAtAsync,
 	remoteRefOid,
 	resolveDefaultBranch,
 	resolveListedCommit,
 	tryCurrentBranch,
 } from "./git";
-export { git, gitAsync, nonInteractiveGitEnv } from "./gitExec";
+export { git, gitAsync, gitAsyncBytes, gitAsyncStream, nonInteractiveGitEnv } from "./gitExec";
 export { assertSafeRef, isSafeRef, remoteNameOf, remoteTrackingRef } from "./refs";

@@ -10,23 +10,130 @@ tags: [pi-package, delegation, subagents]
 
 ## Responsibility
 
-`pi-delegation` is the **portable, pure-pi delegation core**: the framework for creating agent
-sessions *from* agent sessions. One creation primitive (`createChild`) with orthogonal axes; a
-handle that owns the run loop (per-parent FIFO pacing, turn caps, usage aggregation); lineage as
-the storage layout; an in-memory run registry; and lifecycle events. The contract itself lives on
+`pi-delegation` is the **portable, pure-pi delegation core**: the session fabric for controlled
+children owned by either live parent sessions or independent resources. One creation primitive
+(`createChild`) with orthogonal axes; a handle that owns the run loop (per-parent FIFO pacing, turn
+caps, usage aggregation); lineage as the storage layout; an in-memory run registry; and lifecycle
+events. The contract itself lives on
 the barrel (`src/types.ts`, every type documented in place); this SPEC records the semantics, the
 boundary, and the decision log.
 
-**V1 implements exactly one axis combination** — hidden, non-interactive, fresh-origin children
-with explicit `SessionOptions` — consumed by [[module-pi-subagents]]. Every other combination is
-typed in the contract and **loud-rejected** with a typed `DelegationError` until its consumer
-lands (the enumeration: scope & readiness rules below).
+The session-parent path supports hidden, non-interactive children with explicit `SessionOptions`,
+consumed by [[module-pi-subagents]]. The approved resource extension adds a resource owner and
+`fork-captured` history alongside fresh origins, using the same assembly and run owner. Other
+predeclared combinations remain **loud-rejected** with typed `DelegationError`s (scope & readiness
+rules below).
+
+## Approved resource-owned extension
+
+The durable DAG consumer [[module-pi-dag]] adds an independent resource owner alongside session
+parents. No dummy parent session or live-parent lookup is required for resource children. This revises
+the parent-only workflow assumption and decision #9 below for this additional ownership path; existing
+parent APIs, defaults, collection, events and cascades retain their semantics. This extension is
+implemented; parent-only descriptions below continue to document the session-parent path.
+
+The service exposes `registerResource` and provider-independent `captureHistory`. Resource handles own
+prepared execution context, local concurrency and curated factories; they expose `validateModels`,
+`createChild`, `reopenChild` and `release`. Child handles expose identity/record, `runQueued`, literal
+active-only `steer`, `abort` and `dispose`, not raw sessions or a second run loop. `resolveParent` is
+optional for resource-only construction. Release settles pending assembly/children/extensions and
+never disposes an externally borrowed runtime or unrelated parent-owned children.
+
+Capture accepts a trusted read-only pi manager with explicit entry/before-tool-batch cut, or a settled
+stored resource child with its saved boundary. It returns canonical branch JSONL plus identity,
+boundary, digest and size. The consumer retains bytes; core validates/captures/forks without a second
+history store. `fork-captured` adds immutable input while existing live-source fork/seeded placeholders
+remain rejected. Empty cuts are explicit, tool-incomplete/corrupt captures fail, compaction and labels
+are preserved, and source history is never mutated. Resource transcript lookup is strict and shared
+by capture/reopen, not an arbitrary file importer.
+
+`reopenChild` consumes the saved immutable birth record excluding its path, plus saved declarative
+session configuration. It validates owner/scope/file identity and preserves birth metadata, resolving
+only a new access path. Missing files never create replacement sessions. A crash-dangling final tool
+batch receives generic error results before pi replay; a non-tail or malformed gap fails closed because
+no positional repair is safe. Fork assembly persists the actual model and pi-clamped thinking in the
+child branch; source metadata/global defaults stay intact.
+Pi reloads opted-in resources on reopen; saved configuration is not a frozen rendered prompt.
+
+`RunOutcome` gains invocation-local `stopReason` and terminal `historyEntryId`. Finalized-message
+observation survives compaction; usage remains pi-stat deltas. Resource prompts bypass command and
+skill/template expansion. Resource steering synchronously targets only the active invocation through
+pi's queue; enqueue is not consumption. Cancellation covers preflight/queued work and cleans residual
+queues before admitting another run. All settlement stays inside the existing run owner.
+
+Owners supplying a runtime guarantee its lifetime; registry-based retention reuses opaque provider
+replay without reloading source extensions or resynchronizing from later chats. Missing models or
+unsupported runtime-only auth paths fail explicitly, not by substitution. Neither kind of retained
+object is a credential snapshot or an ownership lease. Regression coverage must include later child
+creation after source-chat disposal, unchanged parent behavior, and zero-worker retention.
+
+### Resource implementation decisions and verification
+
+- Resource transcripts use `<delegationRoot>/<scope>/.resources/<resourceId>/<pi-file>.jsonl`.
+  Scope/resource/session segments are validated; capture and reopen share an identity-checked
+  locator that rejects ambiguous files, symlinks, non-regular files and malformed v3 history.
+  Reopen never uses a caller-supplied path, never manufactures a missing transcript, and treats
+  the saved birth record as authoritative for delegation metadata not present in pi's header. It
+  repairs only replay-safe missing results at the active tail before constructing the session.
+- Registration reserves the identity immediately, prepares context before returning, and does
+  not create a session. Duplicate registration fails with `resource-exists`. Effective model
+  references must resolve exactly (`model-unavailable`); resource creation never falls back to
+  an arbitrary SDK model. Registry inputs replay opaque configured/native provider registrations
+  once, without rerunning source extensions. Public auth-source metadata detects runtime-only
+  credentials and unavailable stored-auth replay (`unsupported-auth`), without extracting secrets.
+  This static check cannot certify opaque provider-private state or future remote authentication.
+- Resource concurrency defaults to the service's parent limit (4 unless bound otherwise), with
+  independent FIFO slots per resource. Resource-local factories augment the service curated set;
+  the existing `session.extensions` opt-in and tool allowlist still apply. Resource handles and
+  records never appear in parent lookups, collections, events or disposal cascades. Child specs,
+  model refs and nested configuration are detached before admission can await; records and their
+  `info` values are frozen copies.
+- Release closes all admission synchronously, signals every child before awaiting any teardown,
+  settles in-flight assembly, emits/awaits each resource child's `session_shutdown`, disposes
+  sessions, then removes registration/context/pacing references. Concurrent release/disposal
+  share their existing settlement promises; borrowed runtimes are never disposed.
+- Capture serializes one v3 header and exactly the selected ancestor path. `null` is an explicit
+  empty branch (`[]`, not `getBranch(null)`). Validation checks identity, shape, ancestry, cuts,
+  SHA-256/UTF-8 length, current v3 system/usage/context-edit records and compaction references,
+  including retain-none compactions and label entries. Pi's public `buildSessionContext` supplies
+  compaction-aware replay; `scanReplayTools` supplies tool closure
+  checks and the host repair path's unchanged conservative trailing repair candidates. Failed and
+  aborted assistant attempts do not invent missing successful results. Capture never repairs.
+  Stored capture reads validated bytes directly and invokes no runtime or mutable SDK file open.
+- Forks use an internal private temporary seed with native `SessionManager.forkFrom`, cleaning
+  that seed on either result. Before changing prompt, tools or model, the child appends context edits
+  that hide Anthropic/Claude signed or redacted thinking: those signatures bind the preceding prefix
+  and are not portable to a new child. Canonical captured bytes and raw entries remain unchanged;
+  unsigned and other-provider reasoning remains visible. Actual child model and clamped thinking
+  changes are appended without changing source history or global settings. Captured strings are
+  consumer-retained immutable input, not a core history store. Capture materializes the branch; no
+  byte quota is added in this bounded extension. Admission-limit policy remains a follow-up.
+- Resource prompt preflight uses literal extension-source input; guarded steering synchronously
+  calls public `session.agent.steer` with the unchanged user message. Preflight cancellation is
+  checked immediately before pi starts its run, and cancellation is reapplied at agent start.
+  Queues are cleared before cancellation and again before settlement/admission of another run.
+  `abort()` on a resource handle awaits the invocation's full settlement, including queued work.
+- `RunOutcome.stopReason` and final text are the last finalized assistant observation in that
+  invocation, retained through retries/compaction; cancellation intent cannot overwrite that
+  stop evidence. Usage is still pi cumulative-stat deltas. `historyEntryId` is the settled leaf,
+  including metadata/compaction entries, not proof of successful completion.
+
+Regression suites use only local synthetic providers. They cover parent compatibility and captured
+parent forks; zero-worker/borrowed/registry/native-provider retention; strict stored capture/reopen
+with crash-tail repair and non-tail rejection;
+canonical cuts, current v3 entries, digest/closure/compaction validation; source-independent fan-out
+with provider-bound thinking sanitization; detached admission inputs; resource-local factories and FIFO
+isolation; literal steering and stale-queue cleanup; queued/preflight cancellation; pending assembly/
+shutdown release barriers; and finalized outcomes after a shrinking compaction.
 
 ## Public surface (the barrel, `index.ts`)
 
 - `createDelegationService(bindings)` — the service (`DelegationService`): `createChild` /
-  `findChild` / `childrenOf` / `onLifecycle` / `disposeChildrenOf`.
-- `DelegationBindings` — everything host-specific: `resolveParent` (required; returns
+  `findChild` / `childrenOf` / `onLifecycle` / `disposeChildrenOf`, plus `registerResource` /
+  `captureHistory`. Resource, birth and captured-history contract types are exported from the
+  actual package barrel. `scanReplayTools` is the shared pure replay scanner for capture and host
+  transcript repair; repair policy and synthesized tool results remain host-owned.
+- `DelegationBindings` — everything host-specific: `resolveParent` (optional for resource-only services; parent creation requires it and a live result; returns
   `ParentContext` — `Pick<ExtensionContext, "cwd" | "model" | "thinkingLevel">` plus optional
   `modelRuntime` and `modelRegistry` fields. The parent's own retained `modelRuntime` is preferred
   over every fallback: an embedder whose sessions each retain their creation-time runtime generation
@@ -67,7 +174,7 @@ lands (the enumeration: scope & readiness rules below).
 
 | Pattern | Spec | Driven by |
 |---|---|---|
-| **Subagent** (V1) | `{origin: fresh, visibility: hidden, interactive: false, info: {createdBy: "tool:Agent", roleName, roleSource}, session: from definition}` | `runQueued(task)` — awaited (foreground) or not (background) |
+| **Subagent** | `{origin: fresh, visibility: hidden, interactive: false, info: {createdBy: "tool:Agent", roleName, roleSource}, session: from definition}` | `runQueued(task)` — awaited (foreground) or not (background) |
 | Interactive subsession | `{origin: fresh \| fork, visibility: listed, interactive: true, info: {createdBy: "user"}}` | the user, via the manager — never a run method |
 | Branch | `{origin: fork(current, entryId), visibility: listed, interactive: true, info: {createdBy: "user"}}` (no `session`) | the user |
 | Workflow step | `{interactive: false, info: {createdBy: "workflow:<name>"}}` | `runQueued`/`runNow` by an engine |
@@ -114,7 +221,7 @@ stateDiagram-v2
 | Mechanism | Behavior |
 |---|---|
 | Foreground | `await child.runQueued(task)`. pi executes a batch's tool calls concurrently (verified: `pi-agent-core` `executeToolCallsParallel`), so N `Agent` calls = N children in flight — no `tasks[]`/chain DSL needed. |
-| Per-run outcome | A `RunOutcome`'s `finalText` and `details.usage` belong to **that run alone**: the run captures a baseline (message count + session stats) before `prompt()`, derives `finalText` only from messages the run added, and reports usage/cost/token **deltas** against the baseline — never the child session's cumulative totals. A reusable child running sequential tasks would otherwise return the previous run's text after a preflight failure and double-count usage (PR #302 review finding). `contextTokens` stays a point-in-time snapshot by design. |
+| Per-run outcome | A `RunOutcome`'s `finalText`, `stopReason` and `details.usage` belong to **that run alone**: the run captures a session-stat baseline before `prompt()`, observes finalized assistant `message_end` events for text/stop evidence (never a shrinking message-array index), and reports usage/cost/token **deltas** against the baseline — never the child session's cumulative totals. A reusable child running sequential tasks would otherwise return the previous run's text after a preflight failure and double-count usage (PR #302 review finding). `contextTokens` stays a point-in-time snapshot by design. |
 | Concurrency | Semaphore **per parent session**, default 4; FIFO. Why: the model decides how many spawns to emit — each child is a full LLM session, so unbounded spawn multiplies token spend, provider 429 pressure, and load on the one shared event loop (no crash isolation). Resource governance, not correctness. Host-wide ceiling: config follow-up. |
 | Background | Don't await the promise. Completion → `run-terminal` event; the subagent tool layer additionally injects a `subagent-completion` custom message into the parent. |
 | Result collection | Registry snapshot via `findChild(id)`: terminal → final output + details, marks `collected`; running → status snapshot (not an error); unknown id → error naming the restart-loss case + the derived transcript path. |
@@ -122,6 +229,18 @@ stateDiagram-v2
 | Turn cap | `RunOptions.maxTurns`: on cap, `steer()` a wrap-up instruction, then `abort()`. No wall-clock timeout (provider retries are pi's job). |
 | Abort / dispose | `signal` in `RunOptions` (tool abort, engine fail-fast) and `ChildHandle.abort()` both cancel the active run through one run-scoped signal. The handle path must cancel a run that is still **queued**, not merely call `abort()` on its idle pi session: queued cancellation resolves immediately while the eventual slot grant is handed straight back, and no provider work starts (PR #302 review finding, regression-pinned). A running cancellation aborts the pi session. `ChildHandle.dispose()` first marks the child disposed, cancels through that same signal, and awaits the run's terminal settlement before disposing the pi session and removing the child; a queued run therefore cannot hang behind a sibling or emit terminal lifecycle work after `child-disposed` (follow-up PR #302 review finding, regression-pinned). Every child owns one shared teardown promise: concurrent handle disposal and parent disposal both await it, so `disposed` means admission is closed rather than teardown is already complete. Parent dispose → `disposeChildrenOf` cascade, which includes already-disposing children still registered to that parent, then **marks every captured child disposed and signals every active run synchronously before awaiting any shared teardown**; it cannot return while child work is still settling (second follow-up PR #302 review finding, regression-pinned). Aborting a running child frees its semaphore slot, and an unmarked or uncancelled queued sibling could otherwise issue provider work or remain pending during the cascade. A mid-turn parent abort kills only awaited (foreground) runs via their signals; detached runs survive turn aborts. |
 | Restart | Foreground dangling toolCalls → healed by the embedder's generic transcript repair (ThinkRail: `repairDanglingToolCalls`). Registry is in-memory: detached runs are lost (accepted); transcripts remain on disk and stay openable. |
+
+A parent id has a replaceable in-memory lifetime. `disposeChildrenOf(parent)` rotates that lifetime
+synchronously, detaches its child set, semaphore and fallback runtime, signals every admitted child,
+and awaits both those children and child preparations that started in the retired lifetime. A later
+parent with the same id receives a fresh lifetime immediately; cleanup from the retired one cannot
+remove or admit children into the replacement. A preparation rechecks its captured lifetime after
+assembly and disposes the unregistered session before rejecting when stale.
+
+`ChildHandle.abort(reason?)` installs cancellation intent synchronously, including for queued work;
+its promise may remain pending while Pi settles an active provider/tool run. Callers that acknowledge
+intent rather than settlement may detach that promise, but must attach a rejection handler and continue
+to treat lifecycle snapshots as terminal authority.
 
 ### Storage & lineage
 
@@ -132,7 +251,7 @@ stateDiagram-v2
   `~/.thinkrail/delegation` with `scope = workspaceId`; pure pi defaults to
   `<piAgentDir>/delegation` with `scope = "default"`. Hidden by construction: session listings
   scan only the default root.
-- **V1 lineage = the storage layout.** The directory structure *is* the parent edge; the
+- **Lineage = the storage layout.** The directory structure *is* the parent edge; the
   transcript path derives from `(scope, parentSessionId, childSessionId)` with no index file. A
   persisted `SpawnRecord` index becomes real when `listed` visibility lands (the type exists now,
   the file does not).
@@ -142,12 +261,12 @@ stateDiagram-v2
   children (no graph traversal); a join is engine control flow, not a session.
 - **Retention is the embedder's:** ThinkRail ties child lifetime to the **workspace** (archival
   deletes; closing a tab deletes nothing — mechanics: [[submodule-server-agent]]). Pure pi: no GC.
-  No per-parent GC anywhere in V1.
+  No per-parent GC anywhere.
 - `listed` children (future) ride everything that exists — manager registration → tabs, WS
   streaming, hydration, restart repair; the wire's `SessionSummary` grows optional lineage fields
   then, not now.
 
-## V1 child assembly (what the core owns, consumers never see)
+## Child assembly (what the core owns, consumers never see)
 
 The child's resource loader is **narrow by default**: no discovered extensions, no prompt
 templates, no themes; context files, skills, and the embedder's curated extension set
@@ -195,19 +314,20 @@ consumers — ThinkRail keeps the handle for the manager's dispose cascade and t
 handlers, and passes it to the `pi-subagents` factory; under vanilla pi the `pi-subagents`
 extension constructs it with defaults. Everything host-specific enters through the one
 `DelegationBindings` bag (typed + documented in `src/types.ts`); **every field has a pure-pi
-default except `resolveParent`**, which cannot default inside a library — the embedder owns the
-live-parent lookup (ThinkRail: the manager; pure pi: the consuming extension's own `ctx`).
+default except the live-parent lookup when session-parent creation is used** — `resolveParent` is
+optional for resource-only services; the embedder owns the session-parent lookup (ThinkRail: the manager; pure pi: the consuming extension's own `ctx`).
 
-**Pure-pi V1 bar (user-settled):** the consuming extension loads and runs correctly under vanilla
-pi with pi's **default tool rendering** — no pi-tui widget in V1 (the rich live card is the web
+**Pure-pi bar (user-settled):** the consuming extension loads and runs correctly under vanilla
+pi with pi's **default tool rendering** — no pi-tui widget (the rich live card is the web
 renderer's job). Verified on demand by `bun run smoke:subagents` (described in
-[[module-pi-subagents]]). npm publication stays possible; not a V1 goal.
+[[module-pi-subagents]]). npm publication stays possible; not a goal.
 
 ## Scope & readiness rules (user-settled)
 
-**V1 = the core + subagents, nothing else.** Future patterns are out of scope, their UX unpinned —
+**The implemented core serves subagents and the approved resource-owned extension above.** Other
+future patterns are out of scope, their UX unpinned —
 but the core must be ready: the **contract carries the full axis space; the implementation stays
-minimal**. Unexercised combinations (`listed`, `fork`, `seeded`, `interactive: true`, `runNow`,
+minimal**. Unexercised combinations (`listed`, live-source `fork`, `seeded`, `interactive: true`, `runNow`,
 `session` absent, a `workspace` provider) **reject loudly** with typed errors — the seam is real,
 the dead code is not. A future pattern's first consumer must only *fill in* its combination, never
 reshape the contract.
@@ -222,6 +342,24 @@ sequencing (`prepare` names the child id, which exists only after creation) is p
 consumer, the ThinkRail worktree provider. Report-back from a subsession to its parent (when
 subsessions land) is pi-native (`sendMessage`/`followUp`) — no core provision needed beyond
 lineage.
+
+## User cancellation
+
+`ChildHandle.abort(reason?: string)` records its optional plain-string reason in the active run's
+`DelegationRunDetails.abortReason`, preserved in snapshots, outcomes and terminal events. The first
+accepted cancellation wins, including one with no reason; caller signals, disposal and turn caps
+participate in that ordering without adding a reason. Terminal runs are unchanged, and each new run
+resets both the cancellation latch and reason. Reasons are metadata, not lifecycle statuses.
+
+Child creation revalidates parent liveness after asynchronous session/extension preparation, before
+registering the handle. If the embedder closed that parent during preparation, the unregistered child
+is disposed and creation fails with `unknown-parent`. This prevents an in-flight birth from escaping
+a parent's already-captured teardown list without introducing a second pending-child registry.
+
+The host uses `"user"` for explicit user cancellation; [[module-pi-subagents]] owns its completion
+policy. No UI dependency or second registry is involved. Queued cancellation settles immediately,
+returns any eventual slot grant and starts no provider work; running cancellation uses the existing
+run-scoped signal. Non-user paths retain their behavior.
 
 ## Decision log (how the contract got its shape)
 
@@ -242,7 +380,7 @@ lineage.
    not creation (per-run: a chain reuses a child with different caps).
 5. **Pacing = two explicit methods** (user round; supersedes a `pacing` option and its brief
    deletion): a `run()` that silently parks on a queue is hidden policy — the call site must say
-   which it wants. `runNow` loud-rejects in V1 (no consumer), consistent with the readiness rule.
+   which it wants. `runNow` loud-rejects while it has no consumer, consistent with the readiness rule.
 6. **`visibility` required, no default** (user round) — same call-site transparency rule. It stays
    a *core* axis because its consequences (storage root, manager registration) are creation-time
    actions only the core may perform, and it is not derivable from `interactive`.
@@ -290,8 +428,8 @@ lineage.
     posture keeps `web → contracts`-only intact and the package host-free. (Rejected: authoring
     the type in the package and re-exporting through `contracts` — `contracts` imports no
     extension packages.)
-21. **Pure-pi V1 bar: loads + works under default rendering** (user-settled) — no pi-tui widget in
-    V1; the rich live card ships web-side.
+21. **Pure-pi bar: loads + works under default rendering** (user-settled) — no pi-tui widget; the
+    rich live card ships web-side.
 22. **`collectResult()` added to `ChildHandle`** (implementation round): the `collected` flag needs
     a maintainer, and a side-effectful `snapshot` getter was the only alternative — `snapshot`
     stays a pure read; collection is the explicit act.
@@ -329,3 +467,19 @@ lineage.
     children. This is opaque replay, not provider interpretation, private-field access, or extension
     re-execution. It makes standalone children compatible with provider-registering extensions while
     preserving the stronger parent-runtime path for runtime-only credentials and state.
+
+27. **Resource ownership is not a synthetic session parent.** One prepared resource context and
+    local semaphore feed the existing child assembly/run owner; no second session runtime loop,
+    child registry API, lineage index or durable payload store is introduced. Parent behavior
+    remains independent. This extends decision #9 rather than weakening parent liveness.
+28. **Canonical capture is provider-independent and immutable.** A trusted read-only manager or a
+    strictly located resource transcript supplies an explicit cut. Replay safety is validated using
+    pi context construction and the shared generic scanner. Fork admission validates again; source
+    availability after capture is irrelevant. Live-source fork/seeded placeholders remain rejected.
+29. **Faithful reopen uses caller birth authority, not invented transcript metadata.** Scope,
+    resource/file identity and supported shaping are validated; immutable birth metadata survives
+    unchanged except for its newly resolved access path. Opted-in resources reload through normal
+    pi assembly, not a persisted rendered prompt.
+30. **Resource control is literal and invocation-scoped.** Steering never starts a turn, queues are
+    cleared before successor admission, and cancellation spans preflight through terminal settlement.
+    Finalized message events supply stop/text evidence; pi persisted-entry stats supply usage deltas.

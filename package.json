@@ -5,13 +5,17 @@
 	"workspaces": {
 		"packages": [
 			"apps/*",
-			"packages/*"
+			"packages/*",
+			"pi-extensions/*"
 		],
 		"catalog": {
 			"@astrojs/check": "0.9.10",
-			"@earendil-works/pi-agent-core": "0.84.3",
-			"@earendil-works/pi-ai": "0.84.3",
-			"@earendil-works/pi-coding-agent": "0.84.3",
+			"@changesets/changelog-github": "1.0.1",
+			"@changesets/cli": "3.0.3",
+			"@earendil-works/pi-agent-core": "1.0.2",
+			"@earendil-works/pi-ai": "1.0.2",
+			"@earendil-works/pi-coding-agent": "1.0.2",
+			"@earendil-works/pi-tui": "1.0.2",
 			"@fontsource-variable/geist": "5.3.0",
 			"@fontsource-variable/jetbrains-mono": "5.3.0",
 			"@fontsource-variable/orbitron": "5.3.0",
@@ -25,7 +29,7 @@
 			"react": "19.3.0-canary-a1124489-20260826",
 			"react-dom": "19.3.0-canary-a1124489-20260826",
 			"tailwindcss": "4.3.1",
-			"typebox": "1.3.7",
+			"typebox": "1.3.27",
 			"typescript": "6.0.3"
 		}
 	},
@@ -69,6 +73,11 @@
 		"check:boundaries": "bun test scripts/checkModuleBoundaries.test.ts && bun scripts/check-module-boundaries.ts",
 		"check:seams": "bun scripts/check-binary-seams.ts",
 		"check:spec-surface": "bun scripts/check-spec-surface.ts",
+		"check:pi-packages": "bun scripts/check-pi-packages.ts",
+		"changeset": "changeset",
+		"release:version": "changeset version && bun install --no-frozen-lockfile",
+		"release:pack": "bun scripts/pack-pi-package.ts",
+		"release:publish": "bun scripts/publish-pi-packages.ts",
 		"download:discord-messages": "bun scripts/download-discord-messages.ts",
 		"import:discord-package": "bun scripts/import-discord-package.ts",
 		"import:telegram-export": "bun scripts/import-telegram-export.ts",
@@ -78,9 +87,12 @@
 		"colors:generate": "bun --filter @thinkrail/web colors:generate",
 		"colors:check": "bun --filter @thinkrail/web colors:check",
 		"spacing:generate": "bun --filter @thinkrail/web spacing:generate",
-		"spacing:check": "bun --filter @thinkrail/web spacing:check"
+		"spacing:check": "bun --filter @thinkrail/web spacing:check",
+		"provider-glyphs:check": "bun --filter @thinkrail/web provider-glyphs:check"
 	},
 	"devDependencies": {
+		"@changesets/changelog-github": "catalog:",
+		"@changesets/cli": "catalog:",
 		"@biomejs/biome": "2.5.0",
 		"@earendil-works/pi-coding-agent": "catalog:",
 		"@thinkrail/artifact-tests": "workspace:*",

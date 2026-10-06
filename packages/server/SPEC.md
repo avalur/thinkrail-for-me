@@ -5,7 +5,7 @@ status: active
 title: Engine host (server library)
 parent: architecture
 depends-on: [module-contracts, module-shared]
-tags: [v1, host]
+tags: [host]
 references: [module-artifact-tests]
 ---
 
@@ -21,8 +21,9 @@ e2e).
 - **Owns:** the HTTP+WS server, static serving, the WS dispatch registry, server-side feature services
   (project/workspace/git/fs/terminal + the in-process `AgentSession` manager), and `~/.thinkrail`
   persistence.
-- **Public surface:** `createServer(options) → Promise<RunningServer>` (`{ port, stop, shutdown }`) —
-  `stop()` is synchronous resource disposal for low-level tests while `shutdown()` is the idempotent,
+- **Public surface:** `createServer(options) → Promise<RunningServer>`
+  (`{ port, startAttributionClaim, stop, shutdown }`) — saved-choice attribution waits for the launcher's
+  explicit UI-readiness call; `stop()` is synchronous resource disposal for low-level tests while `shutdown()` is the idempotent,
   bounded production lifecycle (settle sessions + drain analytics and dispose sockets/PTYS/watchers)
   every launcher must await — the public
   factory starts Central artifact watching and applies the initial current PI runtime before binding a socket
@@ -47,7 +48,7 @@ e2e).
   node-run e2e worker. Not for `apps/*` use — the web/CLI boundary rules are unchanged.
 - **Allowed deps:** `contracts` (types + WS constants), `shared` (`shellEnv` and the Central adapter), `bun-pty`,
   `@earendil-works/pi-coding-agent` + `@earendil-works/pi-ai` (runtime), `pino` + its pretty/rolling
-  destinations (host diagnostics), Bun/Node.
+  destinations (host diagnostics), `jsonc-parser` (targeted shared Pi configuration edits), Bun/Node.
 - **Deployment obligation:** product behavior lives in the owning server feature module and is composed by
   `host`; launchers only supply boot options and packaged resources. When a demonstrated second environment
   needs a different implementation, the owning feature defines one narrow injected port rather than a
@@ -74,7 +75,9 @@ internals**. The edges between them are owned here (see the dependency graph), n
 | `github` | read-only local `gh` auth status (shell-out) for the New-Workspace surface | [github/SPEC.md](src/github/SPEC.md) |
 | `branch-review` | best-effort open GitHub PR / GitLab MR number for a workspace branch | [branch-review/SPEC.md](src/branch-review/SPEC.md) |
 | `pr` | `pr.open`: push the workspace branch + open/update its GitHub PR, body rendered from the plan | [pr/SPEC.md](src/pr/SPEC.md) |
-| `fs` | read dirs/files inside a worktree (path-contained) | [fs/SPEC.md](src/fs/SPEC.md) |
+| `fs` | read dirs/files inside a worktree (path-contained) + the one byte classification (text/mime/sha-256) | [fs/SPEC.md](src/fs/SPEC.md) |
+| `changes` | host-owned revert of a hunk or a file's whole change in the worktree, with undo receipts | [changes/SPEC.md](src/changes/SPEC.md) |
+| `trash` | move a path to the OS trash through the bundled helpers (never `unlink`) | [trash/SPEC.md](src/trash/SPEC.md) |
 | `spec` | the worktree's spec-graph snapshot (`spec.graph`) + project-level `projectHasSpecs`, via `pi-spec-graph/core` | [spec/SPEC.md](src/spec/SPEC.md) |
 | `todos` | a chat's per-session TODO plan read/write (`todo.*`), via `pi-todos/core` | [todos/SPEC.md](src/todos/SPEC.md) |
 | `reviews` | draft review comments on files/diffs: store + anchoring + context-package render | [reviews/SPEC.md](src/reviews/SPEC.md) |
@@ -82,8 +85,8 @@ internals**. The edges between them are owned here (see the dependency graph), n
 | `terminal` | workspace-scoped `bun-pty` terminals | [terminal/SPEC.md](src/terminal/SPEC.md) |
 | `agent` | in-process pi sessions + current/retained runtime generations + one-shot completions | [agent/SPEC.md](src/agent/SPEC.md) |
 | `auth` | provider status/login plus native JetBrains Central lifecycle and quota orchestration | [auth/SPEC.md](src/auth/SPEC.md) |
-| `assist` | ad-hoc one-shot tasks (workspace naming, …) on a cheap model, best-effort | [assist/SPEC.md](src/assist/SPEC.md) |
-| `analytics` | always-on basic events + explicitly consented product insights → PostHog sink (privacy contract in its spec) | [analytics/SPEC.md](src/analytics/SPEC.md) |
+| `assist` | ad-hoc one-shot tasks (plan summaries, …) on a cheap model, best-effort | [assist/SPEC.md](src/assist/SPEC.md) |
+| `analytics` | always-on basic events + preference-controlled optional insights → PostHog sink (privacy contract in its spec) | [analytics/SPEC.md](src/analytics/SPEC.md) |
 | `feedback` | host-scoped usage count + addressed product-interview invitation lifecycle | [feedback/SPEC.md](src/feedback/SPEC.md) |
 | `dialog` | the host's native folder picker | [dialog/SPEC.md](src/dialog/SPEC.md) |
 | `editors` | detect installed editors/IDEs, launch one at a worktree, reveal a worktree in the file manager | [editors/SPEC.md](src/editors/SPEC.md) |
@@ -99,13 +102,14 @@ the host from env via `bootHost` for dev/e2e.
 
 `host` is the **only composition root** — it wires each feature's handlers into the WS registry.
 
-- `host` → `projects`, `workspaces`, `git`, `github`, `branch-review`, `pr`, `fs`, `spec`, `todos`, `reviews`, `watch`, `terminal`, `dialog`, `editors`, `agent`, `auth`, `assist`, `settings`, `history`, `templates`, `hub`, `analytics`, `feedback`, `log`, `persistence` (`dataDir`, for the crash report)
+- `host` → `projects`, `workspaces`, `git`, `github`, `branch-review`, `pr`, `fs`, `spec`, `todos`, `reviews`, `changes`, `watch`, `terminal`, `dialog`, `editors`, `agent`, `auth`, `assist`, `settings`, `history`, `templates`, `hub`, `analytics`, `feedback`, `log`, `persistence` (`dataDir`, for the crash report)
 - `hub` → `persistence` (`dataDir`), `log`
 - `workspaces` → `projects`, `git`, `persistence`
 - `branch-review` → `git`, `subprocess`
 - `pr` → `workspaces`, `git`, `todos`, `branch-review` (provider detection + gh-output parsing + the shared CLI runner), `github` (`ghSetupProblem` — the named compare-fallback reason)
 - `projects` → `git` (shared runner), `persistence`
-- `git` → `subprocess` (every child that talks to a network or another CLI)
+- `git` → `subprocess` (every child that talks to a network or another CLI), `fs` (`resourceMeta`/`decodeText` — a diff side's content classification is the same one `fs.readFile` reports)
+- `changes` → `git` (the scope→range resolver + the original side's blob at its resolved oid), `fs` (path containment + byte identity), `persistence` (workspace lookup), `trash` (a revert that removes a file)
 - `github` → `subprocess` (both `gh auth status` probes run under the same bounded runner as `git`/`branch-review`)
 - `git`, `fs`, `spec`, `watch`, `terminal`, `settings`, `analytics`, `feedback` → `persistence` (`spec` also → `pi-spec-graph/core`, external; `analytics` also → the pi-ai built-in provider/model catalog + `posthog-node`, external—the identity-bucketing vocabulary and delivery SDK)
 - `log` → `persistence` (`dataDir`) — and **any feature module (+ `host`) may → `log`**: it is the one
@@ -114,7 +118,8 @@ the host from env via `bootHost` for dev/e2e.
   `log` (would cycle); `initLogging` is called only from `host`'s `bootHost`
 - `todos` → `workspaces` (worktree path lookup) + `pi-todos/core` (external, value-imported, pi-free)
 - `reviews` → `workspaces` (worktree path lookup), `persistence` (data dir), `git` (the review's baseSha
-  resolve, plus the diff range + blob read behind a base-side anchor). The `review.send*` flows are
+  resolve, plus the diff range + blob read behind a base-side anchor), `fs` (the shared byte
+  classification + sha-256 an anchor's `contentHash` is). The `review.send*` flows are
   **composed in `host`'s handlers** (reviews builds the package, `agent` runs the session — no
   `reviews`→`agent` edge; `host` serializes sends *and* review mutations per workspace via
   `reviewLock`, and re-attaches the review's persisted chat via `agent.ensureSessionAttached`), and the
@@ -122,18 +127,20 @@ the host from env via `bootHost` for dev/e2e.
   `host` installs (`agent.setReviewCommentHandler` → `reviews.resolveCommentFromAgent`)
 - `assist` → `agent` (the one-shot completion primitive)
 - `auth` → `agent` (the current runtime/auth facade plus candidate prepare/activate; one-way, `agent` never imports `auth`)
-- `agent` → `log`, `persistence` (`dataDir` — the static state-root resolver; the delegation store lives at
-  `<dataDir>/delegation`, bound in the agent's delegation embedding) — otherwise the pi runtime alone; auth
-  passes desired opaque Central paths through its public generation seam
-- `persistence`, `dialog`, `history`, `templates`, `subprocess` → (leaves)
+- `agent` → `log`, `persistence` (`dataDir` for delegation plus session lifecycle/receipt load-save operations),
+  `trash` (a chat delete's recoverable transcript move) — otherwise the pi runtime alone; auth passes desired
+  opaque Central paths through its public generation seam
+- `persistence`, `dialog`, `history`, `templates`, `subprocess`, `trash` → (leaves)
 
 Rules: features never import `host`, and never each other except the edges above. The graph is acyclic.
 `agent`'s WS surface (`session.*` + `pi.event` forwarding) attaches to `host`. Features that push on their
 own never import `host` either: they expose a **publisher-injection seam** (`setTerminalPublisher`,
-`setSessionPublisher` + `setSessionCreatedPublisher` + `setSessionDeletedPublisher`, `setLoginPublisher`, `projects`' `setProjectPublisher` for the full-snapshot
+`setSessionPublisher` + `setSessionCreatedPublisher` + `setSessionDeletedPublisher` +
+`setSessionStatePublisher`, `setLoginPublisher`, `projects`' `setProjectPublisher` for the full-snapshot
 `project.updated` lifecycle, `workspaces`' `setWorkspacePublisher` for the
 `workspace.created`/`updated`/`removed` lifecycle trio, `settings`' `setSettingsPublisher` for
-`settings.changed`, `feedback`'s addressed invitation publisher, and auth's Central action analytics +
+`settings.changed` (full merged config plus the successful applied update for host-side explicit-field effects),
+`feedback`'s addressed invitation publisher, and auth's Central action analytics +
 `provider.changed` invalidation publishers) that
 `host` installs at `createServer`—so channel/analytics wiring lives only in `host`. Current layout has no
 host module, persistence, method, or publisher.
@@ -150,8 +157,15 @@ registry-free too — it takes a plain `cwd`, never a `workspaceId`; the `templa
 
 Analytics is host-mediated the same way: **every capture call site lives in `host`**. Host translates
 existing boot, session, setup, task, review and PR observations into the closed event vocabulary and
-syncs additional-data consent from the settings publisher. Correlation stays host-local and clears on
-consent changes. `analytics` has no `settings` edge and no feature module knows analytics exists.
+syncs the additional-data delivery gate from applied updates that explicitly contain `analyticsEnabled`;
+unrelated settings broadcasts preserve the current preference. Correlation stays host-local and clears when
+sharing is disabled. `analytics` has no `settings` edge and no feature module knows analytics exists.
+
+The Chat Resources integration adds `agent` → `pi-background-commands` as an external
+package edge, alongside its existing delegation packages. `host` continues to compose the wire
+through the `agent` barrel; there is no new resource-manager sibling or `agent` → `terminal` /
+`subprocess` / `settings` edge. Command lifecycle and bounded output belong to the portable package,
+while the manager owns its association with an actual parent session.
 
 Subagent availability is also host-mediated: `settings` owns the global default, `workspaces` owns the
 optional local override, and `host` injects their effective value into `agent` plus requests live-session
@@ -160,9 +174,10 @@ reevaluation after either mutation. No feature imports a sibling to derive the p
 ## Get right
 
 - **No process isolation** — a fatal agent/provider fault takes the whole host down (accepted tradeoff).
-- **No cross-process state coordination** — `bootHost` permits multiple hosts to use the same data
-  directory. Each host owns only its in-process services and event stream; shared persistence has no
-  transaction, locking, or convergence guarantee, so concurrent writes may be last-writer-wins.
+- **No general cross-process state coordination** — `bootHost` permits multiple hosts to use the same data
+  directory. Installation identity, its one-time event claim, and browser-attribution attempts use narrow
+  exclusive filesystem operations; other shared persistence has no general lock, transaction, or
+  convergence guarantee, so concurrent writes may be last-writer-wins.
 - **One graceful shutdown per host** — launchers await `RunningServer.shutdown()`; repeated calls share one
   promise, while abrupt death relies on operating-system process cleanup.
 - **WS commands return values directly**; only events + extension-UI use push channels.
@@ -170,4 +185,4 @@ reevaluation after either mutation. No feature imports a sibling to derive the p
 
 ## Later
 
-Persistence behind a data layer (V2), `owner` threading.
+Persistence behind a data layer, `owner` threading.

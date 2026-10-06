@@ -16,12 +16,14 @@ import {
 import type { SkillCatalogEntry, SlashCommandInfo } from "@thinkrail/contracts";
 import specGraphExtension from "pi-spec-graph";
 import { hubToolsExtension } from "../hub/tools";
+import { type BundledTrashHelpers, setBundledTrashHelpers } from "../trash";
 import {
 	type AskUserQuestionWaiters,
 	askUserQuestionExtension,
 	createAskUserQuestionWaiters,
 } from "./askUserQuestion";
 import { oversizedImageGuard } from "./imageGuard";
+import { requestReviewExtension } from "./requestReviewTool";
 import { reviewToolExtension } from "./reviewTool";
 import { decideSkill, type SkillAdmissionContext } from "./skillAdmission";
 import {
@@ -29,7 +31,7 @@ import {
 	candidateCompatibilitySkillRoots,
 	discoverCompatibilitySkillSources,
 } from "./skillSources";
-import { type BundledTrashHelpers, setBundledTrashHelpers } from "./trash";
+import { setTitleExtension } from "./titleTool";
 
 export type BundledExtensionFactory = ExtensionFactory;
 
@@ -210,6 +212,8 @@ export async function buildResourceLoader(
 		headlessSearchPolicy,
 		askUserQuestionExtension(askUserQuestionWaiters),
 		reviewToolExtension,
+		requestReviewExtension,
+		setTitleExtension,
 		oversizedImageGuard,
 		hubToolsExtension,
 		...extraFactories,

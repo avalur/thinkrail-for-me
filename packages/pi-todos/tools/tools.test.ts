@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
-	ExtensionContext,
+	ExtensionToolContext,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { TODO_STATUSES, TodoStore } from "../core/index.ts";
@@ -28,7 +28,7 @@ function run(
 	return tool.execute("call-1", params, undefined, undefined, {
 		cwd,
 		sessionManager: { getSessionId: () => "sess-test" },
-	} as unknown as ExtensionContext);
+	} as unknown as ExtensionToolContext);
 }
 
 function isError(result: AgentToolResult<unknown>): boolean {
@@ -321,6 +321,33 @@ test("done-with-summary stores it and the last done nudges todo_plan_summary; th
 		const set = await run("todo_plan_summary", { summary: "Task landed; suite green." }, cwd);
 		expect(isError(set)).toBe(false);
 		expect(store.read().summary).toBe("Task landed; suite green.");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("re-completing a plan that gained new work echoes the surviving summary and asks to extend it", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-todos-tools-"));
+	try {
+		const first = (await run(
+			"todo_add",
+			{ title: "First step", group: "Task" },
+			cwd,
+		)) as AgentToolResult<{ todo: { id: string } }>;
+		await run("todo_update", { id: first.details.todo.id, status: "done" }, cwd);
+		await run("todo_plan_summary", { summary: "First step shipped." }, cwd);
+
+		// New work arrives (an add never drops the surviving plan summary), then finishes.
+		const second = (await run(
+			"todo_add",
+			{ title: "Second step", group: "Task" },
+			cwd,
+		)) as AgentToolResult<{ todo: { id: string } }>;
+		const done = await run("todo_update", { id: second.details.todo.id, status: "done" }, cwd);
+		const text = done.content[0]?.type === "text" ? done.content[0].text : "";
+		// The nudge echoes the surviving note and asks to extend it, not rewrite from scratch.
+		expect(text).toContain("EXTEND");
+		expect(text).toContain("First step shipped.");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

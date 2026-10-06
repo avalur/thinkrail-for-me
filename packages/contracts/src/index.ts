@@ -11,6 +11,7 @@ export {
 	isJbcentralConnected,
 	isJbcentralQuotaRefreshSeconds,
 	isLineWidth,
+	isPlanReviewResult,
 	isRetriedAttempt,
 	isSystemThemePair,
 	isTerminalWindowsShell,
@@ -20,6 +21,8 @@ export {
 	MAX_HISTORY_LIMIT,
 	MAX_HISTORY_QUERY_LENGTH,
 	normalizeThemePreference,
+	PLAN_REVIEW_VERDICTS,
+	RECENT_MODELS_LIMIT,
 	REQUEST_IMAGE_BASE64_BUDGET,
 	TERMINAL_REPLAY_KB,
 	TERMINAL_WINDOWS_SHELLS,
@@ -47,5 +50,5 @@ export {
 } from "./hubDomain";
 export type * from "./nativeClient";
 export type * from "./piProtocol";
-export { assistantToolCallsAreExecutable, isTranscriptMessageRole } from "./piProtocol";
+export { assistantToolCallsAreExecutable, isTranscriptMessageRole, sameModel } from "./piProtocol";
 export * from "./wsProtocol";

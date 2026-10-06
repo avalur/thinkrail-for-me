@@ -1,4 +1,5 @@
 import type {
+	Ack,
 	AppConfig,
 	ExtUiRequest,
 	HostUpdateNotice,
@@ -9,51 +10,125 @@ import type {
 	Project,
 	ReviewChangedPayload,
 	ServerWelcome,
-	SessionActivityPayload,
 	SessionCreatedPayload,
 	SessionDeletedPayload,
 	SessionEventPayload,
+	SessionStateRecord,
 	Workspace,
 	WorkspaceFsChangedPayload,
 	WorkspaceRemoved,
 } from "@thinkrail/contracts";
-import { ACTIVITY_PROTOCOL_VERSION, WS_CHANNELS } from "@thinkrail/contracts";
+import {
+	CHANGE_MUTATIONS_PROTOCOL_VERSION,
+	HOST_UPDATE_RUN_PROTOCOL_VERSION,
+	PLAN_REVIEW_SUBAGENT_PROTOCOL_VERSION,
+	PLAN_SUMMARY_GENERATION_PROTOCOL_VERSION,
+	REVIEW_RICH_ANCHORS_PROTOCOL_VERSION,
+	SESSION_STATE_PROTOCOL_VERSION,
+	WS_CHANNELS,
+} from "@thinkrail/contracts";
 import { isConnectedGeneration, useAppStore } from "../store";
-import { createActivityHydration } from "./activityHydration";
 import { createPiEventBatcher, shouldFlushPiEventsBefore } from "./piEventBatcher";
 import { WsTransport } from "./transport";
 
 let transport: WsTransport | null = null;
 
-export function supportsSessionActivity(protocolVersion: number | null): boolean {
-	return protocolVersion !== null && protocolVersion >= ACTIVITY_PROTOCOL_VERSION;
+export function supportsHostUpdateRun(protocolVersion: number | null): boolean {
+	return protocolVersion !== null && protocolVersion >= HOST_UPDATE_RUN_PROTOCOL_VERSION;
 }
 
-const activityHydration = createActivityHydration({
-	apply: (payload) => useAppStore.getState().applySessionActivity(payload),
-	hydrate: (rows) => useAppStore.getState().hydrateSessionActivity(rows),
-});
+export function supportsChangeMutations(protocolVersion: number | null): boolean {
+	return protocolVersion !== null && protocolVersion >= CHANGE_MUTATIONS_PROTOCOL_VERSION;
+}
 
-function refreshSessionActivity(connectionGeneration: number): void {
-	const state = useAppStore.getState();
-	if (!supportsSessionActivity(state.protocolVersion)) {
-		activityHydration.abandon();
-		state.hydrateSessionActivity([]);
-		return;
+export function supportsRichAnchors(protocolVersion: number | null): boolean {
+	return protocolVersion !== null && protocolVersion >= REVIEW_RICH_ANCHORS_PROTOCOL_VERSION;
+}
+
+export function runHostUpdate(): Promise<Ack> {
+	return getTransport().request("host.update", {});
+}
+
+/** The agent plan-review capability (`todo.startReview`/`reviewAll` + the hidden review subagent) landed at
+ * v67. An older host serves neither, so the UI must not offer it — see [[submodule-web-transport]]. */
+export function supportsPlanReview(protocolVersion: number | null): boolean {
+	return protocolVersion !== null && protocolVersion >= PLAN_REVIEW_SUBAGENT_PROTOCOL_VERSION;
+}
+
+/** Host-side auto plan-summary drafting (`todo.generateSummary`) landed at v69. An older host serves no
+ * such method, so the client must not issue the request. See [[submodule-web-transport]]. */
+export function supportsPlanSummaryGeneration(protocolVersion: number | null): boolean {
+	return protocolVersion !== null && protocolVersion >= PLAN_SUMMARY_GENERATION_PROTOCOL_VERSION;
+}
+
+interface SessionStateHydration {
+	generation: number;
+	installed: boolean;
+	buffered: SessionStateRecord[];
+}
+
+let sessionStateHydration: SessionStateHydration | null = null;
+const SESSION_STATE_BUFFER_LIMIT = 4_096;
+
+export function mergeSessionStateRecords(
+	snapshot: readonly SessionStateRecord[],
+	buffered: readonly SessionStateRecord[],
+): SessionStateRecord[] {
+	const latestBySession = new Map(snapshot.map((record) => [record.sessionId, record]));
+	for (const record of buffered) latestBySession.set(record.sessionId, record);
+	return [...latestBySession.values()];
+}
+
+function applySessionStateRecord(record: SessionStateRecord): void {
+	const store = useAppStore.getState();
+	store.applySessionState(record);
+	if (record.state.needsInput?.kind === "dialog") {
+		store.applyExtUi(record.state.needsInput.request);
 	}
-	const token = activityHydration.begin();
-	const current = (): boolean =>
-		isConnectedGeneration(useAppStore.getState(), connectionGeneration);
-	void getTransport()
-		.request("session.activityList", {})
-		.then((rows) => {
-			if (current()) activityHydration.settle(token, rows);
-			else activityHydration.discard(token);
-		})
-		.catch(() => {
-			if (current()) activityHydration.fail(token);
-			else activityHydration.discard(token);
-		});
+}
+
+function hydrateSessionStates(connectionGeneration: number): void {
+	const hydration: SessionStateHydration = {
+		generation: connectionGeneration,
+		installed: false,
+		buffered: [],
+	};
+	sessionStateHydration = hydration;
+	let retryDelay = 500;
+	const attempt = (): void => {
+		void getTransport()
+			.request("session.stateList", {})
+			.then((records) => {
+				const current = useAppStore.getState();
+				if (
+					sessionStateHydration !== hydration ||
+					!isConnectedGeneration(current, connectionGeneration)
+				) {
+					return;
+				}
+				const ordered = mergeSessionStateRecords(records, hydration.buffered);
+				current.installSessionStateSnapshot(ordered);
+				for (const record of ordered) {
+					if (record.state.needsInput?.kind === "dialog") {
+						current.applyExtUi(record.state.needsInput.request);
+					}
+				}
+				hydration.installed = true;
+				hydration.buffered = [];
+			})
+			.catch(() => {
+				const current = useAppStore.getState();
+				if (
+					sessionStateHydration !== hydration ||
+					!isConnectedGeneration(current, connectionGeneration)
+				) {
+					return;
+				}
+				setTimeout(attempt, retryDelay);
+				retryDelay = Math.min(retryDelay * 2, 8_000);
+			});
+	};
+	attempt();
 }
 
 function refreshLoadedWorkspaceLists(connectionGeneration: number): void {
@@ -132,9 +207,15 @@ export function initTransport(): WsTransport {
 					: undefined,
 				welcome.hostUpdate,
 			);
-		refreshLoadedWorkspaceLists(useAppStore.getState().connectionGeneration);
-		refreshSessionActivity(useAppStore.getState().connectionGeneration);
-		refreshHubData(useAppStore.getState().connectionGeneration);
+		const connectionGeneration = useAppStore.getState().connectionGeneration;
+		refreshLoadedWorkspaceLists(connectionGeneration);
+		if (welcome.protocolVersion >= SESSION_STATE_PROTOCOL_VERSION) {
+			hydrateSessionStates(connectionGeneration);
+		} else {
+			sessionStateHydration = null;
+			useAppStore.getState().installSessionStateSnapshot([]);
+		}
+		refreshHubData(connectionGeneration);
 	});
 
 	transport.subscribe(WS_CHANNELS.hostUpdateAvailable, (data) => {
@@ -167,8 +248,21 @@ export function initTransport(): WsTransport {
 		useAppStore.getState().deleteChat(workspaceId, sessionId, false);
 	});
 
-	transport.subscribe(WS_CHANNELS.sessionActivity, (data) => {
-		activityHydration.push(data as SessionActivityPayload);
+	transport.subscribe(WS_CHANNELS.sessionState, (data) => {
+		const record = data as SessionStateRecord;
+		const hydration = sessionStateHydration;
+		const current = useAppStore.getState();
+		if (hydration && hydration.generation !== current.connectionGeneration) return;
+		if (hydration && !hydration.installed && isConnectedGeneration(current, hydration.generation)) {
+			if (hydration.buffered.length >= SESSION_STATE_BUFFER_LIMIT) {
+				hydrateSessionStates(hydration.generation);
+				sessionStateHydration?.buffered.push(record);
+			} else {
+				hydration.buffered.push(record);
+			}
+			return;
+		}
+		applySessionStateRecord(record);
 	});
 
 	transport.subscribe(WS_CHANNELS.providerLogin, (data) => {
@@ -189,7 +283,15 @@ export function initTransport(): WsTransport {
 	});
 
 	transport.subscribe(WS_CHANNELS.workspaceCreated, (data) => {
-		useAppStore.getState().addWorkspace(data as Workspace);
+		const store = useAppStore.getState();
+		store.addWorkspace(data as Workspace);
+		if (
+			store.protocolVersion !== null &&
+			store.protocolVersion >= SESSION_STATE_PROTOCOL_VERSION &&
+			store.status === "connected"
+		) {
+			hydrateSessionStates(store.connectionGeneration);
+		}
 	});
 
 	transport.subscribe(WS_CHANNELS.workspaceUpdated, (data) => {

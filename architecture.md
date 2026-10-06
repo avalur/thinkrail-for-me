@@ -4,15 +4,15 @@ type: architecture-design
 status: active
 title: ThinkRail — top-level architecture
 parent: goal-and-requirements
-covers: [client-host-split, cli-entrypoint, wire-contract, transport-endpoint, ui-shell-panels, git-worktrees, remote-tailscale, hydrate-then-stream, domain-vs-view-state, frontend-local-workbench-frame, client-local-navigation, central-integration]
-tags: [v1, architecture]
+covers: [client-host-split, cli-entrypoint, wire-contract, transport-endpoint, ui-shell-panels, git-worktrees, remote-tailscale, hydrate-then-stream, domain-vs-view-state, frontend-local-workbench-frame, client-local-navigation, central-integration, portable-pi-packages, thinkrail-extensions]
+tags: [architecture]
 ---
 
 ## Drivers
 
-The product is built around the `pi` agent, run **in-process** (`createAgentSession`). V1 has two
-additive launchers over the same host library: the retained CLI boots the engine host and opens a browser,
-while Electrobun packages that host with a native system-webview shell. The desktop V1 profile is local
+The product is built around the `pi` agent, run **in-process** (`createAgentSession`). Two additive
+launchers share the same host library: the retained CLI boots the engine host and opens a browser,
+while Electrobun packages that host with a native system-webview shell. The desktop profile is local
 only; a later shared-client profile can dial an existing host. The UI ships independently of the host and
 dials it over the network; a phone reaches the selected host over Tailscale.
 
@@ -29,21 +29,32 @@ dials it over the network; a phone reaches the selected host over Tailscale.
 ```
 apps/cli        browser host launcher: boot server + open browser ── depends on ─▶ packages/server
 apps/web        UI client (mobile-first)                           ── depends on ─▶ packages/contracts
-apps/desktop    Electrobun local-host launcher (V1)                ── depends on ─▶ packages/server, packages/contracts, packages/shared
+apps/desktop    Electrobun local-host launcher                     ── depends on ─▶ packages/server, packages/contracts, packages/shared
 apps/website    public landing + blog + /vibecoding (Cloudflare Pages) ── depends on ─▶ packages/website-analytics
 packages/website-analytics  dependency-free browser analytics policy for the public website
-packages/server createServer(): Bun.serve(HTTP+WS) + AgentSessionManager (in-process pi) ── depends on ─▶ packages/contracts, packages/shared, packages/pi-delegation, packages/pi-subagents
+packages/server createServer(): Bun.serve(HTTP+WS) + AgentSessionManager (in-process pi) ── depends on ─▶ packages/contracts, packages/shared, packages/pi-background-commands, packages/pi-delegation, packages/pi-subagents
 packages/contracts  the wire (types-only)
 packages/shared     shellEnv (server-side only)
 packages/spec-graph portable pi extension: spec_* tools + skill (bundled into every session by packages/server;
                     its pi-free core/ read model also backs the host's spec.graph read method)
 packages/pi-visualize          portable pi extension: the visualize tool (bundled into every session)
-packages/pi-delegation         portable pure-pi package: the delegation core — agent sessions spawned
-                    from agent sessions (createChild + run-owning handle, lineage, registry, events)
+packages/pi-delegation         portable pure-pi package: the delegation core — controlled child sessions
+                    for live session parents or independent resource owners
+packages/pi-dag               portable durable backend DAGs over pi-delegation; host-owned resources;
+                    not bundled into ThinkRail, no workflow UI, not a second pi runtime
+packages/pi-background-commands portable explicit session-owned background commands over Pi's executor
+                    (bundled into every ThinkRail parent session by packages/server)
 packages/pi-subagents          portable pure-pi extension: Agent + get_subagent_result tools over
                     pi-delegation (bundled into every ThinkRail parent session by packages/server)
 packages/pi-thinkrail-workflow pi extension: the workflow skill system + its always-on routing rule
                     (bundled into every session; workspace-internal, not portable)
+pi-extensions/*     portable pi packages published to npm as @thinkrail.ai/pi-<name>; work in vanilla pi
+                    (decided, Decision 20; the pi-* packages above move here per publish wave)
+thinkrail-extensions/*  ThinkRail extensions: a pi capability + ./server and ./web halves, composed by one
+                    registry file per side (decided, Decision 21) ── depends on ─▶ pi-extensions/*,
+                    packages/extension-api, packages/ui
+packages/extension-api  types + define* helpers for extension halves (decided, Decision 21) ── depends on ─▶ packages/contracts
+packages/ui         owned shadcn/Radix primitives + cn + onThemeSwap, extracted from apps/web (decided, Decision 21)
 ```
 
 Artifact verification is a separate source-only workspace, [[module-artifact-tests]]. It depends on
@@ -76,7 +87,7 @@ dependency. This keeps test process drivers outside both launchers and the serve
    desktop, or mobile client points it at the selected host's Tailscale MagicDNS name. Native resume state
    is keyed by backend profile so ids from one host are never interpreted against another.
 5. **UI = panels + shell.** Layout-agnostic, store-driven panels (project→workspace nav, file tree,
-   Monaco editor, changes/diff, workspace-local review, terminal, chat, composer) never know their
+   the code renderer, changes/diff, workspace-local review, terminal, chat, composer) never know their
    arrangement. Each desktop frontend window owns one locally persisted, resource-free workbench frame: a
    recursively split center plus auxiliary groups in vertical left/right stacks and a horizontally grouped
    bottom region. The frame's topology, singleton-tool placement, visibility, folds, geometry, and alignment
@@ -85,7 +96,7 @@ dependency. This keeps test process drivers outside both launchers and the serve
    defaulting one terminal to bottom. Another window never rearranges this one. A future mobile shell may
    project the same panels differently; desktop docking does not define that projection. Detail:
    [[submodule-web-shell-layout]].
-6. **Workspaces are git worktrees (V1).** project (git repo) → workspace (`git worktree` on its own
+6. **Workspaces are git worktrees.** project (git repo) → workspace (`git worktree` on its own
    branch/cwd, under `~/.thinkrail/worktrees`) → {chats, files, terminals}. **Two deliberate
    exceptions, both `kind`-marked on the wire and both *user-owned* — never renamed or reclaimed by
    ThinkRail:** every project carries exactly one built-in **Default workspace** (`kind: "default"`)
@@ -95,11 +106,10 @@ dependency. This keeps test process drivers outside both launchers and the serve
    worktree model; and an **existing worktree** the user explicitly attaches in place
    (`kind: "external"`), which ThinkRail may forget but never mutates (see
    [[submodule-server-workspaces]]). The shell is built first,
-   `pi` connected last. **Open PR is V1**: a deterministic, host-side push + open/update of the branch's
+   `pi` connected last. **Open PR** is a deterministic, host-side push + open/update of the branch's
    GitHub PR through the user's own `gh` CLI (no stored tokens, no provider REST API), body rendered from
    the verified plan, with a compare-URL fallback when `gh`/GitHub isn't available (see
-   [[submodule-server-pr]]). CI/Checks status, merge/squash from the app, and `glab` support stay V2;
-   workspace-local Review is V1.
+   [[submodule-server-pr]]).
 7. **Auth is external.** Tailscale ACLs / device identity are the auth; the app carries an `owner` field,
    not a login UI.
 8. **Hydrate-then-stream (every client reconstructs domain state from the host).** A client never relies on
@@ -120,15 +130,25 @@ dependency. This keeps test process drivers outside both launchers and the serve
    remains active through retries, compaction, and queued continuations: pi's `agent_end` is only an
    attempt boundary and may precede more work; `agent_settled` is the authoritative transition to idle.
 
+   **Normalized session state.** The host projects execution, concrete input blockers, Pi-owned queue count,
+   and the latest completion as orthogonal facts. Needs-input is level-triggered and cannot be cleared by
+   viewing; a completion is created only by `agent_settled` or restart reconstruction. Success,
+   failure/length, and interruption remain owner-globally unread until the exact result renders in an
+   unobscured chat reached by deliberate frontend navigation; explicit Stop is quiet. Every client
+   hydrates the same state and exact completion receipts from the host, while chat/tab selection and
+   workspace entry remain frontend-local activation evidence. Background restoration alone is not a read.
+
    **Chat-title contract.** A workspace display name, its Git branch/cwd,
    and each chat title are independent identities; no rename cascades between them. A chat title is pi's
-   durable session name (`session_info`), never browser view state or a host sidecar. An unnamed chat gets
-   one best-effort title from its first accepted text prompt through a bounded, tool-free one-shot completion
-   running in parallel with the agent; unavailable or unusable generation falls back to deterministic
-   prompt-derived text and can never delay or fail the message send. The write is conditional on the pi name
-   still being absent, so any durable manual name always wins. Later turns never retitle automatically;
-   scope drift is handled by manual rename (with explicit user-triggered regeneration a possible later
-   feature). Clients hydrate `SessionSummary.title`, converge live on `session_info_changed`, and continue to
+   durable session name (`session_info`), never browser view state or a host sidecar. **The main agent names
+   its chat and workspace** through the `set_title` tool once the task is clear: it has the context and
+   the tools to read a linked PR/issue/ticket (`Review #567 <title>`), in any tracker. No helper model,
+   first-words heuristic, or host-side link parsing names anything: each of those produced names users
+   wanted to fix. Every write is conditional on the target still being unnamed, so any manual name always
+   wins and the first name is final — nothing retitles automatically. While a target is unnamed, each
+   turn's system prompt says so; guidelines alone were measurably skipped. One call may name both chat and
+   workspace so they agree, but they stay independent identities written separately — not a cascade. If
+   the agent never calls the tool, the target stays unnamed (accepted). Clients hydrate `SessionSummary.title`, converge live on `session_info_changed`, and continue to
    route by session id, so duplicate human titles are legal.
 9. **Domain state, frontend-local frame, and workspace-local views.** *Domain* state — projects,
    workspaces, **sessions + their transcripts**, terminal catalogs/PTYs, and git — is backend-owned, shared,
@@ -163,7 +183,12 @@ dependency. This keeps test process drivers outside both launchers and the serve
     a live wire; more broadly, a silent minor/patch bump is the classic irreproducible-build trap. Exact
     pins make the lockfile the single source of a dependency's version and turn every upgrade into an
     explicit, reviewable diff. Cross-cutting deps (pi, TypeScript, typebox, bun types) are pinned **once** in
-    the root `workspaces.catalog` and referenced via `catalog:`, so their version lives in exactly one place.
+    the root `workspaces.catalog` and referenced via `catalog:`, so their version lives in exactly one place 
+    **and only there: specs never restate it.** A spec that depends on pi behavior names *what* it verified
+    (the dist file, the function, the observed rule) and says "re-verify on a pi bump"; it does not carry
+    "pinned against vX", which is a second copy of the catalog that goes stale on every bump and adds no
+    information. Historical rationale ("pi 0.86 made the loader choice runtime-dependent") is different: it
+    explains *why* a decision exists and never needs updating.
     **Enforced**, not just documented: `scripts/check-catalog.ts` (`bun run check:deps`, in pre-commit + CI)
     rejects any range, any catalog drift, and a lockfile graph that resolves `react` or `react-dom` outside
     its one catalog pin (the temporary prerelease override rationale belongs to [[module-web]]). Exempt:
@@ -211,12 +236,15 @@ dependency. This keeps test process drivers outside both launchers and the serve
     [[central-integration]]. This keeps feature-specific mechanics in
     their leaf specs while making a non-terminating composition visible at the architecture layer.
 
-14. **The public website is one origin, artifact, and production deployment.** `apps/website` owns `/`,
-    `/blog/`, and `/vibecoding/` in one static Astro build deployed through one Cloudflare Pages project.
-    React and Tailwind are permitted only inside [[submodule-website-vibecoding]]; unrelated routes retain
-    their vanilla runtime and hand-written stylesheet. Browser analytics and consent initialize once on the
-    exact `thinkrail.ai` origin. The retired `vibecoding.thinkrail.ai` hostname is an edge redirect that
-    preserves path and query, never a proxy to a second site.
+14. **The public website is one origin and production deployment.** `apps/website` owns `/`, `/blog/`,
+    and `/vibecoding/` in one static Astro build deployed with same-project Cloudflare Pages Functions.
+    D1-backed [[submodule-website-attribution]] provides short-lived browser claims under that deployment;
+    it transfers bounded campaign/referrer touch data, not page identity, and is not a second product host
+    or identity owner. React and Tailwind are permitted only inside
+    [[submodule-website-vibecoding]]; unrelated routes retain their vanilla runtime and hand-written
+    stylesheet. Browser analytics and consent initialize once on the exact `thinkrail.ai` origin. The
+    retired `vibecoding.thinkrail.ai` hostname is an edge redirect that preserves path and query, never a
+    proxy to a second site.
 
 15. **Desktop packaging preserves the host/runtime boundary.** Electrobun `2.0.1` explicitly selects
     its release-owned Bun `1.4.0` runtime and embeds the host in that process, not the default Cottontail
@@ -248,8 +276,80 @@ dependency. This keeps test process drivers outside both launchers and the serve
     the host data dir, a curated child-extension set, and the exact `ModelRuntime` retained by each
     parent session so children stay on that parent's provider generation across Central changes. The
     wire mirrors only the UI-facing run details and exposes transcript reads; neither portable package
-    depends on ThinkRail. Contract, semantics, and the full decision log:
+    depends on ThinkRail. The same core supports independent resource owners with explicit execution
+    context and immutable captured-history forks for durable orchestrators; it never fabricates a parent
+    chat or acquires scheduling/storage policy. Contract, semantics, and the full decision log:
     [[module-pi-delegation]], [[module-pi-subagents]], and [[submodule-server-agent]].
+
+17. **Durable DAGs are host-owned resources, not parent chats.** [[module-pi-dag]] is a separately
+    scoped portable consumer of [[module-pi-delegation]], not a dependency of subagents or the
+    workflow skill system. Delegation owns canonical history capture/forking, retained resource
+    execution contexts, child assembly/reopen and the existing run loop; DAG owns persistence,
+    scheduling, gates and recovery. ThinkRail's selected future composition is workspace-owned,
+    with an explicit host runtime, so no heading session is required. Embedders may apply different
+    lifetime policies through trusted lifecycle controls without another scheduler or human-gate
+    bypass. Restore paused; one process controls each DAG. ThinkRail neither bundles it nor exposes it
+    over the wire or in the UI.
+
+18. **Chat Resources projects capability owners; it is not a generic resource runtime.**
+    [[module-pi-background-commands]] supplies explicit, session-owned log-only commands over Pi's
+    public executor; normal Bash and workspace PTYs stay unchanged. `packages/server` embeds that
+    portable package through `agent` and projects it beside direct [[module-pi-delegation]] children
+    into the current-chat Resources view. Parent session entries own injected command services and
+    retained subagent completion delivery across extension reload; scoped reads, controls, and
+    invalidations are composed through the agent barrel. Detailed integration belongs to
+    [[submodule-server-agent]], and command lifetime/retention to [[module-pi-background-commands]].
+
+19. **The review surface is engine-neutral; renderers are registered, not hard-wired.** A resource (a
+    file or one side-pair of a diff) is shown by the renderer the web's `resources` registry selects by
+    match, rank and capabilities for the current intent and viewport class; review comments anchor
+    through `contracts`' `ReviewSelector` set (`lineRange`/`textQuote` for text, `structural` schemes
+    such as `json-pointer`/`table-cell`/`ipynb-cell`, `region` geometry), which every renderer maps onto
+    its own geometry and reports back as placed or unplaced — the host's anchors are the only authority.
+    `@pierre/diffs` renders every source diff and every phone-class code surface; rich formats render
+    through their own renderers' diffs. Monaco renders files on
+    desktop and never loads on a phone. Write-paths are host-derived and compare-and-swap guarded
+    (`change.revert`/`change.undo`, [[submodule-server-changes]]); the client never sends bytes to
+    write. ThinkRail hosts no VS Code extensions: language intelligence (TextMate grammars, Shiki) is
+    imported as libraries. Active content (HTML, SVG, notebook outputs) renders only inside sandboxed,
+    network-denying frames. Detail: [[submodule-web-resources]], [[submodule-web-panels]],
+    [[submodule-server-reviews]].
+
+20. **Portable pi packages are published, scoped, and held to a vanilla-parity bar.** Capabilities the
+    agent can use anywhere live under `pi-extensions/*` and ship to npm as `@thinkrail.ai/pi-<name>` (the npm
+    org is `thinkrail.ai`; private workspace packages stay `@thinkrail/*`; raw TypeScript, `pi` manifest,
+    `pi-package` keyword; unscoped `pi-*` names collide with third parties).
+    "Works in vanilla pi" is defined, not assumed: install from the packed tarball into an isolated
+    fixture, load through pi's own loader under **Node** (vanilla pi's runtime — ThinkRail runs the same
+    code under Bun, so shipped code is dual-runtime), register and execute tools, render in a real
+    terminal. Releases go through Changesets and npm Trusted Publishing with provenance; the host keeps
+    consuming the packages through `workspace:*`. A portable *library* (delegation) is published without a
+    manifest and is never given a fake factory. Detail and the gate: [[module-pi-extensions]].
+
+21. **ThinkRail extensions are separate packages over a small host UI SDK, composed from registry files.**
+    `thinkrail-extensions/<name>` composes a pi capability with a `./server` half (what the host bundles,
+    as named inline factories; skill packages named by specifier and resolved from the extension, not the
+    host) and a `./web` half (tool renderers keyed by tool name, plus named exports the host uses
+    directly). The halves never import each other or host internals; host-owned scoped state reaches an
+    extension only through explicit seams — the one property fixed now so later extensions (wire
+    methods, panels) extend the `define*` objects instead of replacing them. Composition is static: a
+    server registry (`packages/server/src/extensions/registry.ts`) whose static imports carry factories
+    into every launcher without generated factory lists, and a web registry
+    (`apps/web/src/extensions/registry.ts`). The SDK is `packages/extension-api` (types + `define*`) and
+    `packages/ui` (owned primitives, `cn`, `onThemeSwap`); the highlighted `CodeBlock` stays app-local
+    until a second consumer exists. **Invariant transition:** Decision 1's rule "`apps/web` depends on
+    `packages/contracts` only" holds until the SDK extraction lands, then becomes "`apps/web` depends on
+    `contracts`, `ui`, `extension-api`, and `thinkrail-extensions/*/web` only", enforced with source-half
+    and public-subpath rules. **Delivery rule:** every extension arrives as three independently shippable
+    PRs — new pi package beside the old, web half moved, server half + wiring with the old package
+    deleted — none of which changes anything a user can observe. Install UX, marketplace, per-extension
+    settings and runtime-loaded third-party extensions are explicit deferrals. Rejected: runtime-loaded
+    bundles now (React singleton, versioned UI API, security story first), a logical extension inside
+    the apps (three physical homes, no boundary), generated factory lists derived from descriptors
+    (functions yield no import specifiers). Pilot: visualize — `lovely-mermaid` for TUI rendering and
+    best-effort validation in the portable package, strict `mermaid`+`linkedom` validation injected by
+    the ThinkRail server half through `createVisualizeExtension({ validateMermaid })`. Detail:
+    [[module-thinkrail-extensions]].
 
 ## Invariants
 
@@ -270,13 +370,3 @@ dependency. This keeps test process drivers outside both launchers and the serve
   `@thinkrail/shared/spawn`; bespoke bounded runners set the option directly. Exempt: spawns that inherit
   an existing terminal's stdio (the `update`/`uninstall` CLI subcommands, the build script) and shell
   probes that are no-ops on win32 (`shellEnv`).
-
-## Out of scope (V1)
-
-The workflow **product layer** (a runtime/engine, configurable pipelines) — the skill-based workflow
-*system* ships in V1 as a bundled extension (`module-thinkrail-workflow`: skills + one always-on
-rule, no runtime machinery); the spec-graph **product layer** beyond the read-only viewer (drift detection, pre-build
-approval, living graph) — the pi-side spec-graph *capability* ships in V1 as a bundled extension
-(`module-spec-graph`), and the V1 viewer is a read-only Specs tab over a `spec.graph` wire read;
-CI/Checks status and provider REST API integration beyond `gh`-CLI push/open/update (see
-[[submodule-server-pr]]), self-improvement, automations, per-step model routing, cost ledger.

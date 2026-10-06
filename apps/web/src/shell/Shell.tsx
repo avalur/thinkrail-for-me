@@ -14,6 +14,7 @@ import { IconTooltip } from "../components/ui/tooltip";
 import { PersonalHubView } from "../hub/PersonalHubView";
 import { AnalyticsConsentDialog } from "../panels/AnalyticsConsentDialog";
 import { InterviewPromptDialog } from "../panels/InterviewPromptDialog";
+import { NewWorkspaceDialog } from "../panels/NewWorkspaceDialog";
 import { ProjectTree } from "../panels/ProjectTree";
 import { SettingsDialog } from "../panels/SettingsDialog";
 import { Toaster } from "../panels/Toaster";
@@ -35,15 +36,17 @@ import {
 	readThemeHint,
 	writeThemeHint,
 } from "../themes";
-import type { ConnectionStatus } from "../transport";
+import { type ConnectionStatus, runHostUpdate, supportsHostUpdateRun } from "../transport";
 import { UpdateReadyButton, UpdateSettings, useUpdates } from "../updates";
 import { BrandLogo } from "./BrandLogo";
 import { CollapsedPanelRail } from "./CollapsedPanelRail";
 import { JbcentralQuotaTopbar } from "./JbcentralQuotaTopbar";
 import { LayoutSettings } from "./LayoutSettings";
 import { useLocalLayoutState } from "./layoutState";
+import { NativeWindowControls } from "./NativeWindowControls";
 import { useCollapsibleRegion } from "./useCollapsibleRegion";
 import { useGlobalHotkeys } from "./useGlobalHotkeys";
+import { useNativeWindowControls } from "./useNativeWindowControls";
 import { WorkspaceWorkbench } from "./WorkspaceWorkbench";
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -70,10 +73,23 @@ export function Shell() {
 	const hubTotalUnread = useAppStore(selectHubTotalUnread);
 	const { review: openReview } = useOpenBranchReview(activeWorkspace, status);
 	const hasActiveWorkspace = activeWorkspaceId != null;
-	const updates = useUpdates();
+	const protocolVersion = useAppStore((s) => s.protocolVersion);
+	const updates = useUpdates(supportsHostUpdateRun(protocolVersion) ? runHostUpdate : null);
+	const windowControls = useNativeWindowControls();
+	const [newWorkspaceProjectId, setNewWorkspaceProjectId] = useState<string | null>(null);
 
 	const welcomeCenterRef = useRef<HTMLDivElement>(null);
-	const welcomeProjects = useCollapsibleRegion(welcomeCenterRef, "welcome-left");
+	const {
+		collapsed: welcomeCollapsed,
+		contentRef: welcomeContentRef,
+		focusOrCollapse: welcomeFocusOrCollapse,
+		onCollapse: welcomeCollapse,
+		onDragging: welcomeDragging,
+		onExpand: welcomeExpand,
+		openAndFocus: welcomeOpenAndFocus,
+		panelRef: welcomePanelRef,
+		railRef: welcomeRailRef,
+	} = useCollapsibleRegion(welcomeCenterRef, "welcome-left");
 
 	const [themeHint] = useState(readThemeHint);
 	const welcomeGeneration = useAppStore((s) => s.welcomeGeneration);
@@ -100,7 +116,7 @@ export function Shell() {
 						side: "left",
 					});
 				}
-			: welcomeProjects.focusOrCollapse,
+			: welcomeFocusOrCollapse,
 		...(hasActiveWorkspace
 			? {
 					onWorkspace: () => {
@@ -120,11 +136,22 @@ export function Shell() {
 					},
 				}
 			: {}),
+		...(contextProject
+			? { onNewWorkspace: () => setNewWorkspaceProjectId(contextProject.id) }
+			: {}),
 	});
 	return (
 		<div data-testid="shell" className="grid h-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr]">
-			<header className="flex items-center justify-between border-b border-border-default bg-container-header-bg px-16 py-8">
-				<div className="flex min-w-0 items-center gap-12">
+			<header
+				data-testid="topbar"
+				className="relative window-drag flex h-topbar-row min-w-0 select-none items-center border-b border-border-default bg-container-header-bg px-16"
+			>
+				<div
+					aria-hidden="true"
+					data-testid="window-chrome-inset-left"
+					className="w-window-chrome-inset-left shrink-0"
+				/>
+				<div className="flex min-w-0 items-center gap-12 pr-12">
 					<BrandLogo />
 					<div
 						role="tablist"
@@ -175,7 +202,7 @@ export function Shell() {
 						<div
 							data-testid="scope-context"
 							data-context={activeWorkspace ? "workspace" : "project-home"}
-							className="flex min-w-0 items-center gap-4 leading-tight tr-text-ui"
+							className="flex min-w-0 items-center gap-4 overflow-hidden leading-tight tr-text-ui"
 						>
 							<span className="hidden min-w-0 items-center gap-4 sm:flex">
 								<span
@@ -217,7 +244,10 @@ export function Shell() {
 						</div>
 					) : null}
 				</div>
-				<div className="flex shrink-0 items-center gap-12">
+				<div
+					data-testid="topbar-actions"
+					className="window-no-drag ml-auto flex shrink-0 items-center gap-12"
+				>
 					{updates ? (
 						<UpdateReadyButton
 							updates={updates}
@@ -252,17 +282,32 @@ export function Shell() {
 						</button>
 					</IconTooltip>
 				</div>
+				<div
+					aria-hidden="true"
+					data-testid="window-chrome-inset-right"
+					className="w-window-chrome-inset-right shrink-0"
+				/>
+				{windowControls ? (
+					<NativeWindowControls
+						state={windowControls.state}
+						onMinimize={windowControls.minimize}
+						onToggleMaximize={windowControls.toggleMaximize}
+						onClose={windowControls.close}
+					/>
+				) : null}
 				<SettingsDialog
 					layoutSettings={<LayoutSettings />}
-					updateSettings={
-						updates ? (
-							<UpdateSettings
-								updates={updates}
-								onLater={() => useAppStore.getState().closeSettings()}
-							/>
-						) : undefined
-					}
+					updateSettings={updates ? <UpdateSettings updates={updates} /> : undefined}
 				/>
+				{newWorkspaceProjectId !== null ? (
+					<NewWorkspaceDialog
+						open
+						projectId={newWorkspaceProjectId}
+						onOpenChange={(isOpen) => {
+							if (!isOpen) setNewWorkspaceProjectId(null);
+						}}
+					/>
+				) : null}
 			</header>
 			{viewMode === "hub" ? (
 				<div data-testid="hub-shell-layout" className="h-full min-h-0 min-w-0">
@@ -270,21 +315,21 @@ export function Shell() {
 				</div>
 			) : hasActiveWorkspace && activeWorkspaceId ? (
 				<div data-testid="workspace-shell-layout" className="h-full min-h-0 min-w-0">
-					<WorkspaceWorkbench key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
+					<WorkspaceWorkbench workspaceId={activeWorkspaceId} />
 				</div>
 			) : (
 				<div
 					data-testid="welcome-shell-layout"
-					data-left-collapsed={welcomeProjects.collapsed}
+					data-left-collapsed={welcomeCollapsed}
 					className="flex h-full min-h-0 min-w-0"
 				>
-					{welcomeProjects.collapsed ? (
+					{welcomeCollapsed ? (
 						<CollapsedPanelRail
-							ref={welcomeProjects.railRef}
+							ref={welcomeRailRef}
 							side="left"
 							label="Projects"
 							shortcutKey="B"
-							onOpen={welcomeProjects.openAndFocus}
+							onOpen={welcomeOpenAndFocus}
 						/>
 					) : null}
 					<ResizablePanelGroup
@@ -293,22 +338,22 @@ export function Shell() {
 						className="min-h-0 min-w-0 flex-1"
 					>
 						<ResizablePanel
-							ref={welcomeProjects.panelRef}
+							ref={welcomePanelRef}
 							id="left"
 							order={1}
 							defaultSize={18}
 							minSize={12}
 							collapsedSize={0}
 							collapsible
-							onCollapse={welcomeProjects.onCollapse}
-							onExpand={welcomeProjects.onExpand}
+							onCollapse={welcomeCollapse}
+							onExpand={welcomeExpand}
 						>
 							<aside
-								ref={welcomeProjects.contentRef}
+								ref={welcomeContentRef}
 								data-testid="left-nav"
 								tabIndex={-1}
-								aria-hidden={welcomeProjects.collapsed || undefined}
-								inert={welcomeProjects.collapsed ? true : undefined}
+								aria-hidden={welcomeCollapsed || undefined}
+								inert={welcomeCollapsed ? true : undefined}
 								className="h-full bg-container-sidebar-bg outline-none"
 							>
 								<QuietScrollArea className="h-full" viewportClassName="p-12">
@@ -319,10 +364,10 @@ export function Shell() {
 						<ResizableHandle
 							direction="horizontal"
 							data-testid="resize-left"
-							aria-hidden={welcomeProjects.collapsed}
-							tabIndex={welcomeProjects.collapsed ? -1 : 0}
-							onDragging={welcomeProjects.onDragging}
-							{...(welcomeProjects.collapsed ? { className: "hidden" } : {})}
+							aria-hidden={welcomeCollapsed}
+							tabIndex={welcomeCollapsed ? -1 : 0}
+							onDragging={welcomeDragging}
+							{...(welcomeCollapsed ? { className: "hidden" } : {})}
 						/>
 						<ResizablePanel id="welcome" order={2} defaultSize={82} minSize={40}>
 							<div

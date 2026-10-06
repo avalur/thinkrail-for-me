@@ -10,7 +10,7 @@ import {
 	RiAlertLine as TriangleAlert,
 	RiToolsLine as Wrench,
 } from "@remixicon/react";
-import type { ImageContent, UserMessage } from "@thinkrail/contracts";
+import type { ImageContent, ReviewFixDetails, UserMessage } from "@thinkrail/contracts";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useEffect, useState } from "react";
 import { CustomIcon } from "@/components/CustomIcon";
 import { Button } from "@/components/ui/button";
@@ -24,11 +24,13 @@ import {
 } from "@/lib";
 import { ActivityGroup } from "./ActivityGroup";
 import { AssistantMarkdown } from "./assistantLinks";
+import { BackgroundCommandCompletion } from "./BackgroundCommandCompletion";
 import { CopyButton } from "./CopyButton";
 import { FileChip } from "./FileChip";
 import { useFold, useSelection } from "./foldState";
 import { Markdown } from "./Markdown";
-import { parseReviewPackage, type ReviewPackageItem, reviewPackageLabel } from "./reviewPackage";
+import { ReviewPackageComments } from "./ReviewPackageComments";
+import { parseReviewPackage, reviewFixCommentsToItems, reviewPackageLabel } from "./reviewPackage";
 import { type ChatRow, LARGE_USER_MESSAGE, type TurnDividerData } from "./rows";
 import { formatElapsed, formatTokens } from "./SessionStatsBar";
 import { ToolCard } from "./ToolCard";
@@ -122,8 +124,12 @@ export function ChatTurnView({
 					/>
 				</div>
 			);
+		case "backgroundCommandCompletion":
+			return <BackgroundCommandCompletion details={row.details} />;
 		case "subagentCompletion":
 			return <SubagentCompletionCard id={row.id} details={row.details} text={row.text} />;
+		case "reviewFix":
+			return <ReviewFixCard id={row.id} details={row.details} />;
 		case "tool":
 			return <ToolRow row={row} workspaceRoot={workspaceRoot} onOpenFile={onOpenFile} />;
 		case "activity":
@@ -168,6 +174,14 @@ function userAttachments(content: UserMessage["content"], names?: string[]) {
 const USER_BUBBLE_BASE =
 	"whitespace-pre-wrap break-words rounded-[var(--radius-lg)] border border-bubble-user-border bg-clip-padding bg-bubble-user-bg px-12 py-8 tr-text-reading text-text-muted";
 const USER_BUBBLE = cn("max-w-[85%]", USER_BUBBLE_BASE);
+
+// In unbounded chat-width mode the transcript row is a fixed measure that can be far wider than the
+// pane; a right-aligned user bubble would otherwise sit off-screen and clip on the left. Cap the
+// user side to the pane's content width (the container-query width minus the row's `px-12` gutters,
+// the same `--space-24` the transcript-width calc uses) only in that mode — so a user bubble matches
+// its bounded-mode width and stays fully visible. Bounded mode never matches the selector.
+const USER_SIDE_UNBOUNDED_CLAMP =
+	"[[data-line-width-bounded=false]_&]:max-w-[calc(100cqw-var(--space-24))]";
 
 function AttachmentChip({ label, img }: { label: string; img: ImageContent }) {
 	const [open, setOpen] = useState(false);
@@ -215,7 +229,11 @@ function MessageWithCopy({
 		<div
 			data-testid="chat-message"
 			data-role={messageRole}
-			className={cn("group relative flex flex-col", side === "right" ? "items-end" : "items-start")}
+			className={cn(
+				"group relative flex flex-col",
+				side === "right" ? "items-end" : "items-start",
+				side === "right" && USER_SIDE_UNBOUNDED_CLAMP,
+			)}
 		>
 			{children}
 			<CopyButton
@@ -242,7 +260,11 @@ function UserTurn({
 	const skill = parseSkillInvocation(text);
 	if (skill) {
 		return (
-			<div data-testid="chat-message" data-role="user" className="flex justify-end">
+			<div
+				data-testid="chat-message"
+				data-role="user"
+				className={cn("flex justify-end", USER_SIDE_UNBOUNDED_CLAMP)}
+			>
 				<div className="flex w-full flex-col items-end gap-4">
 					<SkillInvocationCard foldId={`${id}:skill`} invocation={skill} />
 					{skill.userMessage ? (
@@ -258,7 +280,11 @@ function UserTurn({
 	const review = parseReviewPackage(text);
 	if (review) {
 		return (
-			<div data-testid="chat-message" data-role="user" className="flex justify-end">
+			<div
+				data-testid="chat-message"
+				data-role="user"
+				className={cn("flex justify-end", USER_SIDE_UNBOUNDED_CLAMP)}
+			>
 				<div className={USER_BUBBLE}>
 					{attachments.length > 0 ? (
 						<div className="flex flex-wrap gap-4 pb-4" data-testid="chat-message-images">
@@ -271,11 +297,7 @@ function UserTurn({
 						<span data-testid="review-package-summary" className="block text-text-default">
 							{reviewPackageLabel(review)}
 						</span>
-						<ul className="mt-4 flex flex-col">
-							{keyPackageItems(review.items).map(({ key, item }) => (
-								<PackageCommentRow key={key} foldId={`${id}:${key}`} item={item} />
-							))}
-						</ul>
+						<ReviewPackageComments foldPrefix={id} items={review.items} />
 					</div>
 				</div>
 			</div>
@@ -399,52 +421,31 @@ function SkillInvocationCard({
 	);
 }
 
-function keyPackageItems(items: ReviewPackageItem[]): { key: string; item: ReviewPackageItem }[] {
-	const seen = new Map<string, number>();
-	return items.map((item) => {
-		const base = `${item.lineRef}·${item.body}`;
-		const n = (seen.get(base) ?? 0) + 1;
-		seen.set(base, n);
-		return { key: `${base}·${n}`, item };
-	});
-}
-
-function PackageCommentRow({ foldId, item }: { foldId: string; item: ReviewPackageItem }) {
-	const [expanded, toggle, toggleRef] = useFold(foldId);
+function ReviewFixCard({ id, details }: { id: string; details: ReviewFixDetails }) {
+	const items = reviewFixCommentsToItems(details.comments);
+	const noun = details.comments.length === 1 ? "finding" : "findings";
+	const summary =
+		details.comments.length > 0
+			? `Requested a fix on \u201c${details.itemTitle}\u201d \u00b7 ${details.comments.length} ${noun}`
+			: `Requested a fix on \u201c${details.itemTitle}\u201d`;
 	return (
-		<li data-testid="review-package-item" data-chat-fold-root data-expanded={expanded}>
-			<button
-				ref={toggleRef}
-				type="button"
-				data-testid="review-package-item-toggle"
-				aria-expanded={expanded}
-				onClick={toggle}
-				className="flex w-full cursor-pointer select-none items-start gap-4 rounded-[var(--radius-sm)] px-4 py-4 text-left outline-none transition-colors hover:bg-control-bg-hovered focus-visible:ring-2 focus-visible:ring-primary"
-			>
-				<ChevronRight
-					className={cn(
-						"mt-2 size-16 shrink-0 text-text-subtle transition-transform",
-						expanded && "rotate-90",
-					)}
-				/>
-				{item.lineRef && (
-					<span className="shrink-0 tr-code-text text-text-subtle">{item.lineRef}</span>
-				)}
-				<span
-					className={cn(
-						"min-w-0 flex-1 text-text-default",
-						expanded ? "whitespace-pre-wrap" : "truncate",
-					)}
+		<div
+			data-testid="review-fix-card"
+			className="max-w-[85%] overflow-hidden rounded-[var(--radius-lg)] border border-bubble-user-border bg-clip-padding bg-bubble-user-bg px-12 py-8"
+		>
+			<span data-testid="review-fix-summary" className="block tr-text-reading text-text-default">
+				{summary}
+			</span>
+			{details.note ? (
+				<p
+					data-testid="review-fix-note"
+					className="mt-4 whitespace-pre-wrap tr-text-reading text-text-muted"
 				>
-					{item.body}
-				</span>
-			</button>
-			{expanded && item.fragment && (
-				<pre className="mb-4 ml-16 max-h-128 overflow-auto whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border-muted bg-sunken px-8 py-4 tr-code-text text-text-muted">
-					{item.fragment}
-				</pre>
-			)}
-		</li>
+					{details.note}
+				</p>
+			) : null}
+			{items.length > 0 ? <ReviewPackageComments foldPrefix={id} items={items} /> : null}
+		</div>
 	);
 }
 

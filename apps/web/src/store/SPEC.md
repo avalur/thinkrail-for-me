@@ -5,7 +5,6 @@ status: active
 title: store — Zustand app state
 parent: module-web
 depends-on: [module-contracts]
-tags: [v1]
 ---
 
 ## Responsibility
@@ -13,6 +12,25 @@ tags: [v1]
 The single Zustand store: connection status, projects/workspaces, one frontend-local workbench frame plus
 per-workspace views/attention, terminal catalogs, and one **per-session chat runtime** for every live
 `AgentSession` (so several chats stream concurrently).
+
+## Chat Resources
+
+The Resources view keeps host snapshots separately from the Pi conversation runtime, keyed by chat
+identity and current connection authority. Installing/invalidation/clearing a resource snapshot is
+one atomic store action. A monotonic invalidation revision and connection generation fence every
+read installation and failure; tombstones and cleared entries reject late replies. Connection status
+changes mark retained snapshots stale, and an unsupported welcome clears them. `selectors.ts` is the
+canonical owner of Resources selectors and predicates, including active counts and active/finished
+grouping; the host already bounds recent records. Components do not derive these independently.
+`chatResources.ts` is the store's private implementation file for resource projection/state/scope/read
+types and the `staleChatResources` state transform. A parent settling does not clear its still-running
+resources or change the Projects rail's existing activity contract.
+
+Resource snapshots are not browser-persisted. Reconnect or an unsupported host removes control
+authority until a fresh read succeeds; failed reads preserve visibly stale data, never fabricate an
+empty catalog. Chat deletion/workspace removal clears the corresponding projections. Popover and
+selected-log state belong to chat integration, not domain persistence. See
+[[submodule-web-chat-resources]] for presentation and [[module-contracts]] for the wire.
 
 ## Boundary
 
@@ -23,7 +41,7 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   capabilities remain unavailable between sockets and until the current socket's welcome is installed.
   **`installWelcomeSnapshot(protocolVersion, projects, recentProjects,
   config?, hostPlatform?, hostUpdate?)`** installs protocol + both sorted project views + optional config,
-  host platform, optional immutable host-update notice + navigation repair and then advances that readiness
+  host platform, optional host-update lifecycle snapshot + navigation repair and then advances that readiness
   edge in one Zustand write; route validation and capability reads never observe a partial welcome.
   `installProjectSnapshot` remains the project-only primitive for focused
   callers. **`projects`** is the open rail, while **`recentProjects`** is the last-opened-ordered set of every
@@ -76,7 +94,7 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   leaving the client labelling and keying reads off a value the host no longer has; a project never fetched or an id absent from its list is a **no-op** — the next
   `workspace.list` reconciles; **`applyWorkspaceRemoved(projectId, id)`** is the **entire** removal
   reaction (`removeWorkspace` drops the row + `clearWorkspaceState` drops its
-  local view/attention/terminal/activity maps and chat runtimes + recency drops the dead id,
+  local view/attention/terminal maps and chat runtimes + recency drops the dead id,
   and **if it was this client's active workspace** → activate the most recently selected loaded workspace
   whose project remains open, even across projects; when none remains, `selectProject(projectId)` falls back
   to the removed workspace's Project Home; either active fallback gets the same neutral toast that reads right
@@ -108,8 +126,8 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   cannot recreate it.
 
   **Browser-local resource render state** is keyed by workspace + canonical resource id, never embedded in
-  the frame. Loaded file/diff content and ticks, editor modes, live chat runtimes, and resolved document
-  markdown remain caches over their domain sources. Placement ids are stable within a workspace view; an id
+  the frame. Loaded file/diff content and metadata, renderer choice, opaque renderer view state, diff layout,
+  live chat runtimes, and resolved document markdown remain caches over their domain sources. Placement ids are stable within a workspace view; an id
   already owned by another semantic cache gets a collision-safe cache id. A virtual document is legal only
   when its local resource reference names a registered resolver plus durable source identity; `todo-plan`
   resolves by session to the live `PlanPane`. Arbitrary inline markdown cannot enter persisted layout state.
@@ -118,6 +136,12 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
 
   **Workspace-local attention** is selected tab per stable frame group, last-focused center group,
   last-focused auxiliary group, and group navigation clocks. Selection/focus never mutates the frame.
+  A group's *tool* selection is nevertheless shared: singleton tools are frame placements, so a group
+  that shows a tool shows the same tool in every workspace of the window. Selecting a tool (click, reveal,
+  or the focus of a tool move) is written into every retained attention whose selection in that group is a
+  tool or absent, and a newly materialized view inherits the tool selections of the most recently active
+  workspace. A selected workspace *resource* (a terminal in a mixed auxiliary group) stays local and is
+  never overridden. `shell/layoutState` owns this fan-out in the same transaction as the local write.
   Frame replacement reconciles each workspace's attention to a surviving group/tab. Navigation clocks advance
   at request time for local focus-changing opens and explicit re-selection; the stamp travels with the intent
   so acceptance does not count twice. A slow completion is discarded when newer navigation overtakes it.
@@ -204,43 +228,30 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   assistant turn (`removeSupersededAssistant`, the same rule as the overflow-compaction path) —
   otherwise the client renders the reply twice (frozen failed partial + retried copy). Hydration applies
   the same presentation rule to the persisted copy (`chat/hydrate.ts` hides retried attempts — an
-  errored assistant followed by another assistant before any user message), so live and reloaded clients
-  agree.
-  - **Workspace activity** (`activityByWorkspace`) is the host's cross-workspace agent-state signal, the one
-    thing here that describes chats **nobody has open** — the Projects rail's glyphs. Keyed workspace →
-    **`WorkspaceActivity`** (`{ projectId, sessions }`), and **idle is absence at every level**: a retraction
-    deletes the session key and then the workspace key once it empties, so "quiet" is an empty map rather
-    than a map full of nulls. Each entry carries its **own `projectId`** rather than looking one up in
-    `workspaces`: that list is fetched only for *expanded* projects, so a rollup that depended on it would
-    return nothing for the collapsed, never-opened project whose activity the rail most needs to show. A
-    workspace re-attributed to another project replaces its entry, so it is never counted under both.
-    A status that did not move is not a state write at all (the reducer returns the identical object), which
-    is what keeps an always-mounted rail from re-rendering on every event of every session.
-    **`applySessionActivity`** folds one `session.activity` push; **`hydrateSessionActivity`** **replaces**
-    the whole map from the `session.activityList` snapshot — replacement, not merge, because a reconnect must
-    not leave a glyph behind for a session that settled while the socket was down. Replacement is also what
-    makes an **empty** snapshot the retirement path: a client that has seen a v59 host and then reconnects
-    to a pre-activity one hydrates `[]` rather than skipping the read, because that host can send neither a
-    replacement snapshot nor a retraction, and the alternative is stale `running`/`failed` glyphs that never
-    clear. Hydration is equally a no-op when the computed map matches the current one, so a reconnect that
-    changes nothing does not re-render the rail. Both refuse removed
-    workspaces and tombstoned sessions, so a late push cannot resurrect a deleted chat's glyph.
-    The rollup is **not** stored: `workspaceActivityRollup`/`projectActivityRollup` derive it on read from
-    the map alone — no workspace list, no second store slice — with a single shared precedence, the
-    exported **`ACTIVITY_STATUS_ORDER`** (`waiting` > `running` > `failed` > `queued`) — one constant that
-    both this rollup and the glyph's hover breakdown (`apps/web/src/panels/SPEC.md`) read, so the order can
-    never drift between the two — the row speaks for **live/attention work first**: a
-    chat that needs you, then one actively working. A terminal `failed` deliberately sits *below* live work
-    so it cannot paint a busy worktree red — a running sibling must not be masked by an abandoned failure;
-    the fault recedes to the hover breakdown and still owns the glyph whenever nothing live is happening.
-    (This is why a *finished-fine* sibling does **not** demote a lone failure: idle is absence, so there is
-    nothing left in the map to outrank it — that is the "idle draws nothing" invariant, not a masking bug.)
-    Note this is deliberately *not* the host's
-    per-session derivation order (see `packages/server/src/agent/SPEC.md`): there the question is "what is
-    this one chat doing", here it is "which of several chats should this row speak for". A `failed` that has
-    been *superseded* by newer non-failed work in its worktree never reaches this rollup at all — the host
-    suppresses it at the source (failed-supersession, same SPEC), so it arrives as a retraction, not a
-    status this precedence has to rank.
+  errored assistant followed by another assistant message), so live and reloaded clients agree.
+  - **Normalized session state** (`sessionStateByWorkspace`) is the full host-authored state record per
+    workspace/session. Snapshot hydration replaces the map only on a complete current-generation read;
+    ordered pushes fold one record, and deletion removes it. Shared selectors derive needs-input, working,
+    unread-finished, and project/workspace rollups—no stored precedence or second running slice.
+    `SessionRuntime.hostState` is installed with transcript hydration and by state pushes delivered after Pi
+    events. Exact completion ids let `selectReadyCompletionActivation` require current connection, rendered
+    runtime state, unread record, and direct activation of that exact unread completion. Activation records
+    the current completion id as well as its local clock, so an attach/hydration push for the same id cannot
+    erase a deliberate open while a stale activation can never clear a newer result. On a cold connection,
+    a deliberate open before the first state snapshot cannot trust the retained record, which may be absent
+    or stale after reconnect; one pending activation survives only until the ordered snapshot-plus-buffer
+    state installs, which binds its exact unread completion or drops it when the session is quiet/absent. Connection transition and chat deletion clear the pending activation, and
+    later pushes cannot inherit it. The exact result must render before acknowledgement is sent, but a
+    deliberate tab/history activation may happen first and
+    remains eligible once that row mounts—opening and reading is sufficient without a second composer
+    focus. Deliberate workspace entry also activates its already-selected chat once that chat is visible and
+    unobscured, so entering the workspace and reading does not require a second click on the chat. Passive
+    mount/visibility and background layout restoration never advance activation; chat-tab/group selection,
+    direct history/search open, an explicit Review/Plan-panel open-chat action, workspace entry, and
+    unobscured conversation pointer intent do. Workspace
+    entry arms one pending activation only until the first selected center tab converges; competing
+    navigation or any connection transition expires it, so a later background restore cannot inherit an
+    old read gesture. Incidental interactions inside an obscuring history overlay do not.
   Closed chats are reopenable: the workbench close command atomically removes local placement and invokes
   **`closeChatToHistory`**, which **keeps the runtime + host session alive**, records it in
   **`closedChatsByWorkspace`** (`ClosedChat[]`, per workspace, most-recent-first), and clears pending
@@ -256,7 +267,7 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   gaining local placement. **`deleteChat(workspaceId, sessionId)`** is the idempotent
   fold for both a confirmed local `session.delete` and the `session.deleted` broadcast: it atomically drops
   every tab the chat owns — its transcript, live plan page, and any dependent legacy document cache — plus
-  its history row/runtime + skill baseline + activity row, records a page-lifetime tombstone, removes queued opens for the
+  its history row/runtime + skill baseline, records a page-lifetime tombstone, removes queued opens for the
   chat or its dependent documents, and queues a resource-removal intent. The shell layout integration
   removes every matching chat placement and session-backed plan reference through its pure mutation path,
   then reconciles local attention in the same transition. Until then the tombstone renders no body, so a
@@ -370,12 +381,12 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   `provider.login` frame (creating `activeLogin` if the frame arrived first; ignoring frames for a different
   live login), **`clearLoginInput()`** drops the live input the instant a reply is sent (no double-submit),
   and **`clearLogin()`** dismisses it. The **settings surface** state — **`settingsOpen`** +
-  **`settingsSection`** (a const-object enum: `Providers`/`Github`/`Appearance`/`LineWidth`/`Chat`/`Layout`/`Updates`/`Terminal`/`Templates`/`Review`/`Privacy`/`Feedback`) with
+  **`settingsSection`** (a const-object enum: `Providers`/`Models`/`Github`/`Appearance`/`LineWidth`/`Chat`/`Layout`/`Updates`/`Terminal`/`Templates`/`Review`/`Privacy`/`Feedback`) with
   **`openSettings(section?)`** (deep-links to a section, defaults to Providers) / **`closeSettings()`** /
   **`setSettingsSection()`** — lives here so the top-bar gear, Welcome provider warning, and update-ready
   shell affordance can deep-link without prop-drilling. The optional Update key is navigation only. Native
-  updater snapshots/actions remain in `updates`' shell-local hook state; the optional **`hostUpdate`** notice
-  is host domain state, installed atomically from `server.welcome` or replaced by the one
+  updater snapshots/actions remain in `updates`' shell-local hook state; the optional **`hostUpdate`** lifecycle
+  snapshot is host domain state, installed atomically from `server.welcome` or replaced by the one
   `host.updateAvailable` push. It remains visible through a temporary disconnect; a later welcome replaces or
   clears it. The
   ephemeral **`interviewPromptOpen`** plus
@@ -396,6 +407,8 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   **`terminalWindowsShell: TerminalWindowsShell`**, **`composerGrowthLimit: ComposerGrowthLimit`**,
   **`chatLineWidth` / `fileLineWidth`**, their independent **`chatLineWidthBounded` /
   `fileLineWidthBounded`** switches, **`customLayoutPresets: LayoutPreset[]`**,
+  optional **`defaultModel: WireModel` / `defaultEffort: ThinkingLevel`** for new chats, the picker's
+  **`favoriteModels` / `recentModels: WireModel[]`** (defaulting to `[]` so a pre-v77 host reads as "none"),
   **`analyticsEnabled: boolean`**, **`analyticsConsentConfirmed: boolean`**,
   **`subagentsEnabled: boolean`**, **`jbcentralQuotaEnabled: boolean`**,
   and **`jbcentralQuotaRefreshSeconds: number`** ride the same `applyConfig` fold (host-owned, fieldwise
@@ -404,9 +417,9 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   `DEFAULT_CONFIG.terminalWindowsShell`; `TerminalSettings` consumes both terminal fields, while terminal
   spawning remains server-owned — the Terminal, Line width, Chat, shared Layout catalog, Privacy, provider
   controls, and shell quota read sides. Analytics preference and confirmation default independently to false;
-  the store never upgrades a legacy true preference to consent. A selector combines host capability,
-  hydrated configuration, and absent confirmation to drive the one first-launch prompt. Persisted updates
-  converge through `applyConfig`; a draft switch in the prompt is not a store/host write.
+  the store never upgrades a preference to confirmation. A selector combines host capability, hydrated
+  configuration, and absent confirmation to drive the one first-launch prompt. Persisted preference priming
+  and final choice updates converge through `applyConfig`; the dialog's visual draft remains component-local.
   **`chatMessageOrder: ChatMessageOrder`** and **`streamingResponseMovement:
   StreamingResponseMovement`** are instead client-local presentation preferences, hydrated together by
   the chat preference seam from host-qualified browser localStorage or the native shell's injected
@@ -420,10 +433,14 @@ per-workspace views/attention, terminal catalogs, and one **per-session chat run
   **toast queue** — **`toasts: Toast[]`** (oldest-first) with **`pushToast(toast) → id`** / **`dismissToast(id)`**
   and the ergonomic **`toast.error/success/info(message, title?)`** helper (wraps `pushToast` so a non-React
   call site — a `.catch` in a fire-and-forget wire call — can fire one) — lives here so any surface can raise
-  a transient notification; the `panels/Toaster` renders + times them out (errors persist until dismissed).
-  `pushToast` **coalesces an identical live toast** (same variant/title/message — a retried failure returns
-  the existing id instead of stacking a twin) and **caps the queue at 5** (oldest drop — the viewport doesn't
-  scroll, so the newest must stay visible).
+  a transient notification. A toast may additionally carry `durationMs` and one `{ label, onClick }` action;
+  `panels/Toaster` renders that action through Radix `ToastAction` and otherwise owns timeout/swipe closure
+  (errors persist until dismissed). `pushToast` **coalesces an identical actionless live toast** (same
+  variant/title/message/duration — a retried failure returns the existing id instead of stacking a twin),
+  never coalesces actionable receipts whose callbacks name different inverses, and applies the **5-toast cap
+  only by evicting the oldest actionless notifications**. Actionable receipts remain until their own bounded
+  duration closes them or the user dismisses them; if actions already exceed five, a new actionless toast is
+  the cap's eviction candidate rather than an Undo receipt.
   It's the home for a **rejected wire call with no better place to land** (no chat tab to host an error turn),
   complementing `appendErrorTurn` (which handles the in-chat case).
   The host-wide **`templatesVersion: number`** counter + **`bumpTemplatesVersion()`** (increment) is a bare
@@ -470,12 +487,10 @@ components. The **Skills-reload badge** rides the same tick without a separate s
   The selector
   **`selectSkillsStale(state, workspaceId, sessionId)`** = `skillChangeTick > syncedTick` — store-derived
   (survives `ChatView`'s tab-switch remount) and per-session (a sibling/newer chat that loaded the current
-  skills is not flagged; a reload clears only its own). Also **`updateFileTabContent(workspaceId, id, content,
-  tick)`** — a `FileTab` carries the `tick` its content was loaded at, so `FilePane` detects staleness
-  (`workspaceTick > tab.loadedTick`) across tab switches, and its diff twin
-  **`updateDiffTabContent(workspaceId, id, original, modified, tick, loadedTarget)`** — a `DiffTab` follows the same
-  staleness contract in `DiffPane`, in **two** dimensions: the fs tick and the review target the two sides were
-  read against, written together so neither can outlive the content it describes. The transient
+  skills is not flagged; a reload clears only its own). `updateFileTabContent` writes content, `ResourceMeta`,
+  and the captured fs tick together. Its diff twin, `updateDiffTabContent`, additionally writes both sides'
+  metadata, the resolved original oid, and `loadedTarget`; a `DiffTab` is stale in either the fs-tick or review-target
+  dimension, and neither identity may outlive the content it describes. The transient
   A **`reveal-tool` `LayoutIntent`** is the arrangement-agnostic request to reveal/focus a singleton
   side tool; the shell layout integration consumes it and resolves the tool's current saved location.
   **`changesRequest`** and **`specRequest`** add an optional path/item target to that reveal and carry a
@@ -496,8 +511,7 @@ components. The **Skills-reload badge** rides the same tick without a separate s
   **`openDoc(tab)`** caches and places either a resolved **`DocTab`** or a **`PlanTab`** (`kind: "plan"`,
   id `${workspaceId}:plan:${sessionId}` — one page per chat, re-open focuses). Local placement persistence
   keeps only resolver kind + durable session identity, never cached content. `PlanPane` reads the host-owned
-  plan live, so the page has no snapshot to go stale. **`DiffTab`** is a read-only Monaco diff of one
-changed file over **one diff scope** (id `${workspaceId}:diff:${scopeKey}:${path}` — one tab per *(file,
+  plan live, so the page has no snapshot to go stale. **`DiffTab`** is one renderer-dispatched changed file over **one diff scope** (id `${workspaceId}:diff:${scopeKey}:${path}` — one tab per *(file,
 scope)*: **the scope is part of a tab's identity**, because a tab's content must never change meaning
 because the Changes tool's scope flipped underneath it; the tab carries its own `scope`, which is also what
 `DiffPane` re-reads with, never the panel's current one).
@@ -511,13 +525,15 @@ second live dimension (see `panels/SPEC.md`'s live-refresh contract) — and tha
 its content was actually read against** (`DiffTab.loadedTarget`, required, written by every content write).
 Panes mount only while their resource is locally selected, so without that record a diff whose target moved
 while it sat in the background would mount with the new target already in hand, conclude nothing changed, and show the *old*
-target's diff under the new target's label; the cached value is what the mount compares against. Its
-per-resource view state: `view` split|inline via
-**`setDiffTabView`**, split the default; a markdown diff's `rendered` flag via **`setDiffTabRendered`**
-(swaps raw lines for compiled documents — `DiffPane` offers it for markdown paths only); and
-`ignoreWhitespace` via **`setDiffTabIgnoreWhitespace`** (Monaco's `ignoreTrimWhitespace`). All three go
-through one internal `patchDiffRenderState(state, workspaceId, id, patch)` helper — locate-the-resource-cache
-and merge lives once, so a new per-diff toggle is a one-liner, not another copy. Opened by `ChangesPanel`.
+target's diff under the new target's label; the cached value is what the mount compares against. `FileTab`
+and `DiffTab` share `rendererId` plus opaque `viewState`, written by workspace-explicit `setTabRenderer`
+and `setTabViewState` so an unmount callback settling after a workspace switch still updates its owning tab.
+The registry owns view-state interpretation; changing renderer or phone/desktop implementation drops the
+prior opaque state, and each implementation rejects state it cannot interpret. Diff-only presentation keeps
+`view` split|inline via
+`setDiffTabView` (split by default) and `ignoreWhitespace` via `setDiffTabIgnoreWhitespace`. Legacy persisted
+`view` on file documents and `rendered` on diff documents are outside the accepted cache shape and are
+ignored on read; no migration state exists. Opened by `ChangesPanel`.
 **`diffScopeByWorkspace`** + **`setDiffScope(workspaceId, scope)`** hold *what* each workspace's Changes
 panel is diffing (read through **`selectDiffScope`**, which defaults to the shared, referentially stable
 `BRANCH_SCOPE`); keyed **per workspace**, not app-wide like `changesView`, because a scope belongs to that
@@ -564,11 +580,9 @@ branch's review — a commit sha means nothing in another worktree — and dropp
   (that ref *as an open diff tab's live dimension*: the target for a branch-scope tab, `""` for a
   commit/uncommitted one whose sides can't move — derived here, never re-assembled in a panel),
   `selectWorkspaceTick` (the sync-baseline snapshot), `selectWorkspaceSessionIds` (deduplicated local chat
-  placement + history membership used as a reconnect-reconciliation baseline),
-  **`workspaceActivityRollup` / `projectActivityRollup`** (the Projects rail's agent-state rollup — pure
-  functions *over* the slice rather than Zustand selectors, since a fresh rollup object returned from a
-  selector would re-render the rail on every store change; see the activity section);
-  `matchesWorktreePath` (line an agent-reported path — relative or absolute — up against a worktree-relative
+  placement + history membership used as a reconnect-reconciliation baseline), normalized session-state
+  selectors/actions (exact session + workspace/project needs-input/working/unread-finished rollups, direct
+  activation, ready exact-completion acknowledgement), `matchesWorktreePath` (line an agent-reported path — relative or absolute — up against a worktree-relative
   one; shared by the Changes deep link and the spec classifier. The suffix rule is for **absolute reports
   only** and is anchored at a separator: unanchored, `/wt/src/a-foo.ts` would match `src/foo.ts`; applied to
   relative reports, `module-b/SPEC.md` would match the *root* `SPEC.md`) + `specPathMatcher` (is a written

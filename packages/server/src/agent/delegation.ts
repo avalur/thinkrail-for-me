@@ -4,6 +4,7 @@ import { buildSessionContext, SessionManager } from "@earendil-works/pi-coding-a
 import {
 	type DelegationRunStatus,
 	isTranscriptMessageRole,
+	type ThinkingLevel,
 	type TranscriptMessage,
 } from "@thinkrail/contracts";
 import { CodedError } from "@thinkrail/shared/codedError";
@@ -11,12 +12,15 @@ import {
 	createDelegationService,
 	type DelegationService,
 	deriveChildSessionFile,
+	type RunStatus,
 } from "pi-delegation";
-import { createSubagentsExtension } from "pi-subagents";
+import { createSubagents, type Subagents } from "pi-subagents";
 import { dataDir } from "../persistence";
-import { liveParentContext } from "./agentSessionManager";
-import { type BundledExtensionFactory, childExtensionFactories } from "./extensions";
+import { canUseSessionResources, liveParentContext } from "./agentSessionManager";
+import { publishSessionResourcesChanged } from "./chatResources";
+import { childExtensionFactories } from "./extensions";
 import { getPiRuntime } from "./piRuntime";
+import { isHostResourceId, isPiSessionId } from "./resourceIdentity";
 
 export function delegationRootDir(): string {
 	return join(dataDir(), "delegation");
@@ -28,26 +32,35 @@ export function delegationServiceFor(workspaceId: string): DelegationService {
 	let service = services.get(workspaceId);
 	if (!service) {
 		service = createDelegationService({
-			resolveParent: liveParentContext,
+			resolveParent: (sessionId) =>
+				canUseSessionResources(sessionId, workspaceId) ? liveParentContext(sessionId) : undefined,
 			delegationRoot: delegationRootDir(),
 			scope: workspaceId,
 			modelRuntime: getPiRuntime,
 			childExtensionFactories: childExtensionFactories(),
+		});
+		service.onLifecycle((event) => {
+			const parentSessionId =
+				event.type === "child-created" ? event.record.parentSessionId : event.parentSessionId;
+			if (canUseSessionResources(parentSessionId, workspaceId))
+				publishSessionResourcesChanged(workspaceId, parentSessionId);
 		});
 		services.set(workspaceId, service);
 	}
 	return service;
 }
 
-export function subagentsExtensionFor(
+export function subagentsFor(
 	workspaceId: string,
 	isEnabled: () => boolean,
-): BundledExtensionFactory {
-	return createSubagentsExtension({
+	canDeliverCompletion: () => boolean,
+): Subagents {
+	return createSubagents({
 		service: delegationServiceFor(workspaceId),
 		delegationRoot: delegationRootDir(),
 		scope: workspaceId,
 		isEnabled,
+		canDeliverCompletion,
 	});
 }
 
@@ -63,10 +76,12 @@ export function removeWorkspaceDelegation(workspaceId: string): void {
 	rmSync(join(delegationRootDir(), workspaceId), { recursive: true, force: true });
 }
 
-function assertPathSegment(value: string, label: string): void {
-	if (value.length === 0 || value.includes("/") || value.includes("\\") || value.includes("..")) {
-		throw new Error(`Invalid ${label}: not a plain id`);
-	}
+function assertWorkspaceStorageId(value: string): void {
+	if (!isHostResourceId(value)) throw new Error("Invalid workspaceId: not a plain id");
+}
+
+function assertSessionId(value: string, label: string): void {
+	if (!isPiSessionId(value)) throw new Error(`Invalid ${label}: not a Pi session id`);
 }
 
 export function readChildTranscript(
@@ -74,16 +89,19 @@ export function readChildTranscript(
 	parentSessionId: string,
 	childSessionId: string,
 ): { messages: TranscriptMessage[]; status?: DelegationRunStatus } {
-	assertPathSegment(workspaceId, "workspaceId");
-	assertPathSegment(parentSessionId, "parentSessionId");
-	assertPathSegment(childSessionId, "childSessionId");
+	assertWorkspaceStorageId(workspaceId);
+	assertSessionId(parentSessionId, "parentSessionId");
+	assertSessionId(childSessionId, "childSessionId");
 	const path = deriveChildSessionFile(
 		delegationRootDir(),
 		workspaceId,
 		parentSessionId,
 		childSessionId,
 	);
+	const child = services.get(workspaceId)?.findChild(childSessionId);
+	const ownedChild = child?.record.parentSessionId === parentSessionId ? child : undefined;
 	if (!path) {
+		if (ownedChild) return { messages: [], status: ownedChild.snapshot?.status ?? "queued" };
 		throw new CodedError(
 			"SUBAGENT_TRANSCRIPT_NOT_FOUND",
 			`No transcript found for subagent session ${childSessionId}`,
@@ -93,6 +111,56 @@ export function readChildTranscript(
 	const messages = buildSessionContext(sessionManager.getEntries()).messages.filter((message) =>
 		isTranscriptMessageRole(message.role),
 	) as TranscriptMessage[];
-	const status = services.get(workspaceId)?.findChild(childSessionId)?.snapshot?.status;
+	const status = ownedChild?.snapshot?.status;
 	return { messages, ...(status !== undefined ? { status } : {}) };
+}
+
+export interface ReviewSubagentRun {
+	childSessionId: string;
+	status: RunStatus;
+	finalText?: string;
+}
+
+/**
+ * Spawn the plan-review subagent as a hidden, ephemeral delegation child (V1: hidden + fresh + explicit
+ * session), await its run, and dispose it. The child runs with OUR reviewer role (systemPrompt + tool set)
+ * plus the reviewer profile — project context files + child extensions (spec tools) — so it follows
+ * repository guidance, and returns its final text; the host parses the structured verdict from it.
+ * See submodule-server-host-plan-review.
+ */
+export async function runReviewSubagent(
+	workspaceId: string,
+	parentSessionId: string,
+	task: string,
+	role: {
+		systemPrompt: string;
+		tools: string[];
+		model?: { provider: string; id: string };
+		thinkingLevel?: ThinkingLevel;
+	},
+	signal?: AbortSignal,
+): Promise<ReviewSubagentRun> {
+	const child = await delegationServiceFor(workspaceId).createChild({
+		parent: parentSessionId,
+		info: { createdBy: "tool:request_review", roleName: "plan-reviewer" },
+		visibility: "hidden",
+		session: {
+			systemPrompt: role.systemPrompt,
+			tools: role.tools,
+			extensions: true,
+			contextFiles: true,
+			...(role.model ? { model: role.model } : {}),
+			...(role.thinkingLevel ? { thinkingLevel: role.thinkingLevel } : {}),
+		},
+	});
+	try {
+		const outcome = await child.runQueued(task, signal ? { signal } : {});
+		return {
+			childSessionId: child.sessionId,
+			status: outcome.status,
+			...(outcome.finalText !== undefined ? { finalText: outcome.finalText } : {}),
+		};
+	} finally {
+		await child.dispose().catch(() => {});
+	}
 }

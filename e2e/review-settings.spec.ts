@@ -23,19 +23,48 @@ test("Review settings: model + effort render and the auto-fix toggle persists ac
 	await page.keyboard.press("Escape");
 
 	const toggle = page.getByTestId("review-autofix-toggle");
-	await expect(toggle).toHaveAttribute("data-active", "true");
-	await toggle.click();
 	await expect(toggle).toHaveAttribute("data-active", "false");
 	await expect(dialog).toContainText("nothing is auto-sent");
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("data-active", "true");
 
 	await page.reload();
 	await expect(page.getByTestId("connection-status")).toHaveAttribute("data-status", "connected");
 	await page.getByTestId("open-settings").click();
 	await page.getByTestId("settings-nav-review").click();
-	await expect(toggle).toHaveAttribute("data-active", "false");
+	await expect(toggle).toHaveAttribute("data-active", "true");
 
 	await toggle.click();
+	await expect(toggle).toHaveAttribute("data-active", "false");
+
+	await page.keyboard.press("Escape");
+	await expect(dialog).toBeHidden();
+});
+
+test("Review settings: the agent-review toggle persists across a reload", async ({ page }) => {
+	await page.goto("/");
+	await expect(page.getByTestId("connection-status")).toHaveAttribute("data-status", "connected");
+
+	await page.getByTestId("open-settings").click();
+	const dialog = page.getByTestId("settings-dialog");
+	await expect(dialog).toBeVisible();
+	await page.getByTestId("settings-nav-review").click();
+	await expect(dialog).toContainText("Agent-triggered review");
+
+	const toggle = page.getByTestId("agent-review-toggle");
+	await expect(toggle).toHaveAttribute("data-active", "false");
+	await expect(dialog).toContainText("only the Review button starts a review");
+	await toggle.click();
 	await expect(toggle).toHaveAttribute("data-active", "true");
+
+	await page.reload();
+	await expect(page.getByTestId("connection-status")).toHaveAttribute("data-status", "connected");
+	await page.getByTestId("open-settings").click();
+	await page.getByTestId("settings-nav-review").click();
+	await expect(toggle).toHaveAttribute("data-active", "true");
+
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("data-active", "false");
 
 	await page.keyboard.press("Escape");
 	await expect(dialog).toBeHidden();

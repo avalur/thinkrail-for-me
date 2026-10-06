@@ -12,19 +12,22 @@ import type {
 	ReviewComment,
 	ReviewCommentKind,
 	ReviewCommentStatus,
+	ReviewFixDetails,
 	ReviewSendResult,
 	SubagentOverride,
 	TemplateReadLocation,
 	TemplateScope,
 	ThinkingLevel,
 	TodoStatus,
-	TranscriptMessage,
 	WireModel,
 	Workspace,
+	WsMethodMap,
 } from "@thinkrail/contracts";
 import { HUB_WORKSPACE_ID, isControlMessage } from "@thinkrail/contracts";
+import { CodedError } from "@thinkrail/shared/codedError";
 import {
 	abortSession,
+	acknowledgeCompletion,
 	answerQuestion,
 	clampThinkingForModel,
 	clearQueueSession,
@@ -33,23 +36,25 @@ import {
 	deleteSession,
 	ensureSessionAttached,
 	followUpSession,
-	getDefaultModel,
 	getSessionCommands,
 	getSessionMessages,
-	getSessionMessagesSnapshot,
-	getSessionName,
+	getSessionResources,
 	getSessionStats,
 	getSessionWorkspaceId,
 	hasSession,
-	isSessionStreaming,
+	isHostResourceId,
+	isPiSessionId,
 	listAvailableModels,
+	listModelContextSettings,
 	listProjectAliasSkillNames,
-	listSessionActivity,
+	listSessionStates,
 	listSessions,
 	listSkillCatalog,
 	listSkillCommands,
 	notifyExtUi,
+	nudgeSession,
 	promptSession,
+	readBackgroundCommandOutput,
 	readChildTranscript,
 	refreshAvailableModels,
 	refreshSubagentTools,
@@ -59,9 +64,14 @@ import {
 	removeWorkspaceSessions,
 	renameSession,
 	resolveExtUi,
+	sendReviewFixToSession,
+	setModelContextWindow,
 	setSessionModel,
 	setSessionThinkingLevel,
 	steerSession,
+	stopAllSubagents,
+	stopBackgroundCommand,
+	stopSubagent,
 } from "../agent";
 import { type AdditionalAnalyticsCapture, type SendMode, track } from "../analytics";
 import {
@@ -78,12 +88,19 @@ import {
 	updateJbcentral,
 } from "../auth";
 import { findOpenBranchReview } from "../branch-review";
+import {
+	forgetWorkspaceChanges,
+	type RevertChangeParams,
+	revertChange,
+	type UndoChangeParams,
+	undoChange,
+} from "../changes";
 import { selectDirectory } from "../dialog";
 import { listAvailableEditors, openEditor, revealInFileManager } from "../editors";
 import { recordAcceptedMessage, respondToInterview } from "../feedback";
 import { readDir, readFile } from "../fs";
 import {
-	countUnpushedCommits,
+	countPushDivergence,
 	gitDiffFile,
 	gitStatus,
 	listBranches,
@@ -108,6 +125,7 @@ import {
 } from "../projects";
 import {
 	addComment,
+	buildReviewFixDetails,
 	buildSendPackage,
 	clearReview,
 	deleteComment,
@@ -122,7 +140,7 @@ import {
 	sendableComments,
 	updateComment,
 } from "../reviews";
-import { getConfig, updateConfig } from "../settings";
+import { getConfig, noteRecentModel, updateConfig } from "../settings";
 import { evictSpecIndex, projectHasSpecs, specGraph } from "../spec";
 import {
 	deleteTemplate,
@@ -144,6 +162,7 @@ import {
 	addTodo,
 	approveTodoReview,
 	countOpenTodos,
+	generateTodoSummary,
 	listTodos,
 	removeSessionTodoWindows,
 	removeTodo,
@@ -173,11 +192,12 @@ import {
 } from "../workspaces";
 import { ackSend } from "./ackSend";
 import { sessionProviderAnalytics, trackChatStarted } from "./authAnalytics";
-import { maybeAutoNameChat } from "./autoRename";
 import { nudgeBaseRefWorkspaces } from "./fsNudge";
 import { buildHistoryScope } from "./historyScope";
 import { provisionInitialTerminal } from "./initialTerminal";
 import { dropLogin, recordLoginStart } from "./loginAnalytics";
+import { resolveNewChatModel } from "./newChatModel";
+import { planReviewRunning } from "./planReviewQueue";
 import {
 	additionalCapture,
 	captureAdditional,
@@ -187,23 +207,24 @@ import {
 	observeSetupRead,
 	providerAvailability,
 } from "./productAnalytics";
-import { withReviewLock } from "./reviewLock";
+import { startPlanReview } from "./requestReview";
+import { withChangeLock, withReviewLock } from "./reviewLock";
 import { runObservation } from "./runAnalytics";
 import { taskObservation } from "./taskAnalytics";
 import {
 	claimItemFix,
+	clearChangesRequestedIfResolved,
 	isItemUnderActiveReview,
 	itemFixFindings,
 	markClientStale,
 	releaseItemFix,
-	startReviewAllFlow,
-	startTodoReviewFlow,
 } from "./todoReview";
 
 const log = logger("host");
 
 export interface RequestContext {
 	clientKey: string;
+	runHostUpdate?: () => void;
 }
 
 type Handler = (params: unknown, ctx: RequestContext) => unknown | Promise<unknown>;
@@ -218,15 +239,6 @@ async function archiveTeardown(ws: Workspace): Promise<void> {
 	}
 }
 
-function captureChatAutoNameHistory(sessionId: string): readonly TranscriptMessage[] | null {
-	if (getSessionName(sessionId) !== undefined) return null;
-	try {
-		return getSessionMessagesSnapshot(sessionId);
-	} catch {
-		return null;
-	}
-}
-
 async function sendUserMessage(
 	mode: SendMode,
 	sessionId: string,
@@ -236,14 +248,7 @@ async function sendUserMessage(
 ): Promise<{ ok: true }> {
 	const control = isControlMessage(text);
 	const provider = control ? undefined : sessionProviderAnalytics(sessionId);
-	const priorMessages = control ? null : captureChatAutoNameHistory(sessionId);
 	await ackSend(runObservation.send(sessionId, control ? "internal" : "user", operation));
-	if (!control) {
-		const workspaceId = getSessionWorkspaceId(sessionId);
-		if (workspaceId && priorMessages) {
-			void maybeAutoNameChat(sessionId, workspaceId, text, { priorMessages });
-		}
-	}
 	if (provider) {
 		track({
 			name: "message_sent",
@@ -290,13 +295,16 @@ function fireReviewPrompt(
 function fireTodoFixPrompt(
 	p: { workspaceId: string; sessionId: string; id: string },
 	pkg: string,
+	details: ReviewFixDetails,
 	previous: TodoReviewRecord | undefined,
 	requested: TodoReviewRecord,
 	findingIds: string[],
 	capture: AdditionalAnalyticsCapture | null,
 ): void {
 	void ackSend(
-		runObservation.send(p.sessionId, "internal", () => followUpSession(p.sessionId, pkg)),
+		runObservation.send(p.sessionId, "internal", () =>
+			sendReviewFixToSession(p.sessionId, pkg, details),
+		),
 	)
 		.then(
 			() => {
@@ -348,16 +356,41 @@ async function sendToFileChat(
 		);
 	}
 	ensureWorkspaceScratchDir(ws);
+	const defaults = await resolveNewChatModel(opts);
 	const created = await createSession({
 		cwd: ws.worktreePath,
 		workspaceId,
-		...(opts.model ? { model: opts.model } : {}),
-		...(opts.thinkingLevel ? { thinkingLevel: opts.thinkingLevel } : {}),
+		...(defaults.model ? { model: defaults.model } : {}),
+		thinkingLevel: defaults.thinkingLevel,
 	});
 	trackChatStarted(created);
 	await markCommentsSent(workspaceId, ids, created.sessionId);
 	fireReviewPrompt(workspaceId, ids, created.sessionId, pkg);
 	return { ...created, reused: false };
+}
+
+function resourceCwd(workspaceId: string): string {
+	try {
+		return getWorkspace(workspaceId).worktreePath;
+	} catch {
+		throw new CodedError("RESOURCE_UNAVAILABLE", "Session resources unavailable");
+	}
+}
+
+function resourceParams<K extends string>(params: unknown, keys: K[]): Record<K, string> {
+	if (!params || typeof params !== "object" || Array.isArray(params))
+		throw new Error("Invalid resource ids");
+	if (Object.keys(params).some((key) => !keys.some((allowed) => allowed === key)))
+		throw new Error("Invalid resource ids");
+	const result = {} as Record<K, string>;
+	for (const key of keys) {
+		const value: unknown = Reflect.get(params, key);
+		const sessionId = key === "sessionId" || key === "parentSessionId" || key === "childSessionId";
+		if (typeof value !== "string" || !(sessionId ? isPiSessionId(value) : isHostResourceId(value)))
+			throw new Error("Invalid resource ids");
+		result[key] = value;
+	}
+	return result;
 }
 
 const handlers: Record<string, Handler> = {
@@ -404,7 +437,7 @@ const handlers: Record<string, Handler> = {
 	},
 	"workspace.rename": (params) => {
 		const p = params as { id: string; name: string };
-		return renameWorkspace(p.id, p.name, { lock: true, renameBranch: false });
+		return renameWorkspace(p.id, p.name);
 	},
 	"workspace.list": async (params) => {
 		const p = params as { projectId: string; includeDiffStats?: boolean };
@@ -415,14 +448,18 @@ const handlers: Record<string, Handler> = {
 	"workspace.openReview": async (params) => {
 		const p = params as { workspaceId: string; allowCached?: boolean };
 		const ws = getWorkspace(p.workspaceId);
-		const [review, unpushed] = await Promise.all([
-			findOpenBranchReview(ws.worktreePath, ws.branch, {
-				fresh: shouldRefreshOpenReview(p.allowCached),
-			}),
-			countUnpushedCommits(ws.worktreePath, ws.branch),
+		const fresh = shouldRefreshOpenReview(p.allowCached);
+		const [review, divergence] = await Promise.all([
+			findOpenBranchReview(ws.worktreePath, ws.branch, { fresh }),
+			// Only pay the network fetch on a fresh lookup (focus / explicit refresh), not a cached activation.
+			countPushDivergence(ws.worktreePath, ws.branch, { fetch: fresh }),
 		]);
 		if (!review) return review;
-		return unpushed ? { ...review, unpushedCommits: unpushed } : review;
+		return {
+			...review,
+			...(divergence && divergence.ahead > 0 ? { unpushedCommits: divergence.ahead } : {}),
+			...(divergence && divergence.behind > 0 ? { behindCommits: divergence.behind } : {}),
+		};
 	},
 	"workspace.remove": (params) => {
 		const id = (params as { id: string }).id;
@@ -430,6 +467,7 @@ const handlers: Record<string, Handler> = {
 		if (ws) {
 			evictSpecIndex(ws.id);
 			removeWorkspaceReviews(ws.id);
+			forgetWorkspaceChanges(ws.id);
 			stopWatch(ws.id);
 			closeWorkspaceTerminals(ws.id);
 			void archiveTeardown(ws);
@@ -519,10 +557,41 @@ const handlers: Record<string, Handler> = {
 		});
 		return result;
 	},
-	"todo.startReview": (params) =>
-		startTodoReviewFlow(params as { workspaceId: string; sessionId: string; id: string }),
-	"todo.reviewAll": (params) =>
-		startReviewAllFlow(params as { workspaceId: string; sessionId: string }),
+	"todo.startReview": async (params) => {
+		const p = params as { workspaceId: string; sessionId: string; id: string };
+		const ws = getWorkspace(p.workspaceId);
+		if (!(await ensureSessionAttached(p.sessionId, p.workspaceId, ws.worktreePath)))
+			throw new Error("This plan's chat is no longer on disk — can't review.");
+		if (!startPlanReview(p.workspaceId, p.sessionId, p.id))
+			throw new Error("This step is already being reviewed.");
+		return { ok: true };
+	},
+	"todo.reviewAll": async (params) => {
+		const p = params as { workspaceId: string; sessionId: string };
+		const ws = getWorkspace(p.workspaceId);
+		if (!(await ensureSessionAttached(p.sessionId, p.workspaceId, ws.worktreePath)))
+			throw new Error("This plan's chat is no longer on disk — can't review.");
+		const plan = await listTodos({ workspaceId: p.workspaceId, sessionId: p.sessionId });
+		const items = [
+			...plan.todos,
+			...plan.groups.flatMap((g) => g.todos),
+			...(plan.adoptedCommits ?? []),
+		];
+		const targets = items.filter((it) => {
+			const r = it.review;
+			return (
+				r !== undefined &&
+				!(r.state === "reviewed" && (r.unreviewedShas?.length ?? 0) === 0) &&
+				r.reviewing !== true
+			);
+		});
+		const started = targets.filter((it) => startPlanReview(p.workspaceId, p.sessionId, it.id));
+		if (started.length === 0 && planReviewRunning(p.workspaceId, p.sessionId))
+			return { ok: true, total: 0, alreadyRunning: true };
+		return { ok: true, total: started.length };
+	},
+	"todo.generateSummary": (params) =>
+		generateTodoSummary(params as { workspaceId: string; sessionId: string }),
 	"todo.requestFix": async (params) => {
 		const capture = additionalCapture();
 		const p = params as { workspaceId: string; sessionId: string; id: string; feedback: string };
@@ -536,13 +605,21 @@ const handlers: Record<string, Handler> = {
 			const prepared = await withReviewLock(p.workspaceId, async () => {
 				const request = requestTodoFix(p);
 				try {
+					const reviewId = (await getReviewSnapshot(p.workspaceId)).review.id;
 					const findings = await itemFixFindings(p);
+					const details = buildReviewFixDetails({
+						itemId: p.id,
+						itemTitle: request.itemTitle,
+						reviewId,
+						note: p.feedback.trim(),
+						comments: findings,
+					});
 					if (findings.length === 0)
-						return { ...request, fixText: request.pkg, findingIds: [] as string[] };
+						return { ...request, fixText: request.pkg, details, findingIds: [] as string[] };
 					const fixText = `${request.pkg}\n\n${await buildSendPackage(p.workspaceId, findings)}`;
 					const findingIds = findings.map((c) => c.id);
 					await markCommentsSent(p.workspaceId, findingIds, p.sessionId);
-					return { ...request, fixText, findingIds };
+					return { ...request, fixText, details, findingIds };
 				} catch (error) {
 					rollbackTodoFix(p, request.previous, request.requested);
 					throw error;
@@ -552,6 +629,7 @@ const handlers: Record<string, Handler> = {
 				fireTodoFixPrompt(
 					p,
 					prepared.fixText,
+					prepared.details,
 					prepared.previous,
 					prepared.requested,
 					prepared.findingIds,
@@ -581,6 +659,16 @@ const handlers: Record<string, Handler> = {
 		return gitDiffFile(p.workspaceId, p.path, p.scope);
 	},
 	"git.listCommits": (params) => listCommits((params as { workspaceId: string }).workspaceId),
+	"change.revert": (params) => {
+		const p = params as RevertChangeParams;
+		void ensureWatch(p.workspaceId);
+		return withChangeLock(p.workspaceId, async () => ({ receipt: await revertChange(p) }));
+	},
+	"change.undo": (params) => {
+		const p = params as UndoChangeParams;
+		void ensureWatch(p.workspaceId);
+		return withChangeLock(p.workspaceId, async () => ({ receipt: await undoChange(p) }));
+	},
 	"terminal.reserve": (params) => {
 		const p = params as { workspaceId: string; tabKey: string; title: string };
 		getWorkspace(p.workspaceId);
@@ -697,12 +785,14 @@ const handlers: Record<string, Handler> = {
 		};
 		const ws = getWorkspace(p.workspaceId);
 		ensureWorkspaceScratchDir(ws);
+		const defaults = await resolveNewChatModel(p);
 		const created = await createSession({
 			cwd: ws.worktreePath,
 			workspaceId: p.workspaceId,
-			...(p.model ? { model: p.model } : {}),
-			...(p.thinkingLevel ? { thinkingLevel: p.thinkingLevel } : {}),
+			...(defaults.model ? { model: defaults.model } : {}),
+			thinkingLevel: defaults.thinkingLevel,
 		});
+		if (p.model && created.model) noteRecentModel(created.model);
 		trackChatStarted(created);
 		return created;
 	},
@@ -750,7 +840,6 @@ const handlers: Record<string, Handler> = {
 	},
 	"session.dispose": async (params) => {
 		const { sessionId } = params as { sessionId: string };
-		if (isSessionStreaming(sessionId)) await abortSession(sessionId).catch(() => {});
 		await removeSession(sessionId);
 		runObservation.forget(sessionId);
 		taskObservation.forget(sessionId);
@@ -774,7 +863,7 @@ const handlers: Record<string, Handler> = {
 	},
 	"session.setModel": async (params) => {
 		const p = params as { sessionId: string; model: WireModel };
-		await setSessionModel(p.sessionId, p.model);
+		noteRecentModel(await setSessionModel(p.sessionId, p.model));
 		return { ok: true } as const;
 	},
 	"session.setThinkingLevel": (params) => {
@@ -804,16 +893,87 @@ const handlers: Record<string, Handler> = {
 			}
 		});
 	},
-	"session.activityList": () =>
-		listSessionActivity(
+	"session.stateList": () =>
+		listSessionStates(
 			listAllWorkspaceRecords().map((workspace) => ({
 				id: workspace.id,
+				projectId: workspace.projectId,
 				cwd: workspace.worktreePath,
 			})),
 		),
+	"session.acknowledgeCompletion": (params) => {
+		const p = params as { sessionId: string; completionId: string };
+		return acknowledgeCompletion(p.sessionId, p.completionId);
+	},
+	"session.nudge": async (params) => {
+		const p = params as {
+			workspaceId: string;
+			sessionId: string;
+			text: string;
+			images?: ImageContent[];
+		};
+		const workspace = getWorkspace(p.workspaceId);
+		const attachedWorkspaceId = getSessionWorkspaceId(p.sessionId);
+		if (
+			(attachedWorkspaceId !== undefined && attachedWorkspaceId !== p.workspaceId) ||
+			(attachedWorkspaceId === undefined &&
+				!(await ensureSessionAttached(p.sessionId, p.workspaceId, workspace.worktreePath)))
+		) {
+			throw new Error(`Unknown session: ${p.sessionId}`);
+		}
+		if (!isControlMessage(p.text)) throw new Error("Session nudge must be a control message");
+		const nudge = nudgeSession(p.sessionId, p.text, p.images);
+		if (nudge.disposition !== "needs_input") {
+			await ackSend(runObservation.send(p.sessionId, "internal", nudge.send));
+		}
+		return { disposition: nudge.disposition };
+	},
+	"session.activityList": () => [],
 	"session.getMessages": (params) => {
 		const p = params as { sessionId: string; workspaceId: string };
 		return getSessionMessages(p.sessionId, p.workspaceId, getWorkspace(p.workspaceId).worktreePath);
+	},
+	"session.resources": (params) => {
+		const p = resourceParams(params, ["workspaceId", "sessionId"]);
+		return getSessionResources(p.workspaceId, p.sessionId, resourceCwd(p.workspaceId));
+	},
+	"backgroundCommand.output": (params) => {
+		const p = resourceParams(params, ["workspaceId", "sessionId", "commandId"]);
+		return readBackgroundCommandOutput(
+			p.workspaceId,
+			p.sessionId,
+			p.commandId,
+			resourceCwd(p.workspaceId),
+		);
+	},
+	"backgroundCommand.stop": async (params) => {
+		const p = resourceParams(params, ["workspaceId", "sessionId", "commandId"]);
+		await stopBackgroundCommand(
+			p.workspaceId,
+			p.sessionId,
+			p.commandId,
+			resourceCwd(p.workspaceId),
+		);
+		return { ok: true } as const;
+	},
+	"subagent.stop": async (params) => {
+		const p = resourceParams(params, ["workspaceId", "parentSessionId", "childSessionId"]);
+		await stopSubagent(
+			p.workspaceId,
+			p.parentSessionId,
+			p.childSessionId,
+			resourceCwd(p.workspaceId),
+		);
+		return { ok: true } as const;
+	},
+	"subagent.stopAll": async (params) => {
+		const p = resourceParams(params, ["workspaceId", "parentSessionId"]);
+		const targeted = await stopAllSubagents(
+			p.workspaceId,
+			p.parentSessionId,
+			resourceCwd(p.workspaceId),
+		);
+		return { ok: true, targeted } as const;
 	},
 	"subagent.getTranscript": (params) => {
 		const p = params as { workspaceId: string; parentSessionId: string; childSessionId: string };
@@ -849,8 +1009,16 @@ const handlers: Record<string, Handler> = {
 			}),
 		);
 	},
+	"model.contextSettings": () => listModelContextSettings(),
+	"model.setContextWindow": (params) => {
+		const p = params as WsMethodMap["model.setContextWindow"]["params"];
+		return setModelContextWindow(p.target, p.contextWindow);
+	},
 	"model.default": () =>
-		observeSetupRead(getDefaultModel, (result) => (result.model ? { model_available: "yes" } : {})),
+		observeSetupRead(
+			() => resolveNewChatModel({}),
+			(result) => (result.model ? { model_available: "yes" } : {}),
+		),
 	"provider.status": () =>
 		observeSetupRead(getProviderStatus, (report) => ({
 			provider_available: providerAvailability(report),
@@ -890,6 +1058,11 @@ const handlers: Record<string, Handler> = {
 			maxAgeMs: config.jbcentralQuotaRefreshSeconds * 1_000,
 			force: (params as { force?: boolean }).force === true,
 		});
+	},
+	"host.update": (_params, ctx) => {
+		if (!ctx.runHostUpdate) throw new Error("Host update is unavailable.");
+		ctx.runHostUpdate();
+		return { ok: true } as const;
 	},
 	"settings.update": (params) => {
 		const config = (params as { config: AppConfigUpdate }).config;
@@ -934,12 +1107,34 @@ const handlers: Record<string, Handler> = {
 			body?: string;
 			status?: ReviewCommentStatus;
 		};
-		return withReviewLock(p.workspaceId, async () => updateComment(p));
+		return withReviewLock(p.workspaceId, async () => {
+			const updated = await updateComment(p);
+			// Resolving/dismissing the item's last open finding must clear its changes_requested verdict
+			// too (no-op while findings remain), the same invariant as commentDelete.
+			if (updated.origin?.todoId)
+				await clearChangesRequestedIfResolved({
+					workspaceId: p.workspaceId,
+					sessionId: updated.origin.sessionId,
+					id: updated.origin.todoId,
+				});
+			return updated;
+		});
 	},
 	"review.commentDelete": (params) => {
 		const p = params as { workspaceId: string; id: string };
 		return withReviewLock(p.workspaceId, async () => {
+			const origin = (await getReviewSnapshot(p.workspaceId)).comments.find(
+				(c) => c.id === p.id,
+			)?.origin;
 			await deleteComment(p.workspaceId, p.id);
+			// A changes_requested verdict must not outlive its findings: if this was the item's last open
+			// finding, drop the verdict back to unreviewed.
+			if (origin?.todoId)
+				await clearChangesRequestedIfResolved({
+					workspaceId: p.workspaceId,
+					sessionId: origin.sessionId,
+					id: origin.todoId,
+				});
 			return { ok: true } as const;
 		});
 	},

@@ -5,7 +5,6 @@ status: active
 title: transport — WS client to the host
 parent: module-web
 depends-on: [module-contracts]
-tags: [v1]
 ---
 
 ## Responsibility
@@ -34,7 +33,9 @@ batches high-frequency Pi events without allowing later wire messages to overtak
   `resume` repairs them all at once by restating the truth rather than confirming the confirmations —, channel
   `subscribe` with last-value replay for snapshots; append-only terminal data and the one-shot terminal
   exit/detach + session-creation/deletion + `provider.changed` invalidation + addressed `feedback.interview`
-  channels are never cached or replayed to late subscribers, reconnect/backoff;
+  channels, plus scoped `session.resourcesChanged` invalidations, are never cached or replayed to late
+  subscribers. Resource metadata hydration belongs to the mounted chat integration, not replayed
+  invalidation payloads. Reconnect/backoff;
   `inferUrl` defaults to
   same-origin; **`httpBase()`** derives the host's HTTP origin
   from the WS `url` — for building host HTTP URLs like the `/files/<workspaceId>/<path>` worktree-file
@@ -53,7 +54,7 @@ batches high-frequency Pi events without allowing later wire messages to overtak
   `includeDiffStats: false`, generation-fencing the result and folding only already-known rows through
   `updateWorkspace`, so a pushed full workspace snapshot missed while disconnected (including a rename)
   cannot stay stale without misrepresenting this metadata repair as membership reconciliation;
-  the immutable host-update notice via `applyHostUpdate`, project snapshots via
+  the full host-update lifecycle snapshot via `applyHostUpdate`, project snapshots via
   `applyProjectUpdated`, consecutive `pi.event` frames through the batcher into one
   `handlePiEvents(payloads)` store commit, `pi.extensionUi` via `applyExtUi(request)`,
   `workspace.created` via `addWorkspace(workspace)`, `workspace.updated` via `updateWorkspace(workspace)`,
@@ -61,8 +62,7 @@ batches high-frequency Pi events without allowing later wire messages to overtak
   (peer-created domain state enters history only, never local placement), `session.deleted` via the idempotent
   `deleteChat(workspaceId, sessionId)` tombstone fold (an online fast path; because this event channel is
   deliberately not replayed, workbench hydration repairs any deletion missed while disconnected from the next
-  authoritative `session.list`), **`session.activity`** via `applySessionActivity(payload)`,
-  `provider.changed` via the atomic store invalidation
+  authoritative `session.list`), `provider.changed` via the atomic store invalidation
   `noteProviderChanged()` plus a `model.list` re-read installed through the store's monotonic provider-version
   guard (the model-catalog hook uses the same guarded write for every list/refresh, so an older reply cannot
   restore a removed generation's models; provider settings observes the same version and re-reads
@@ -72,33 +72,19 @@ batches high-frequency Pi events without allowing later wire messages to overtak
   `workspace.fsChanged` via `noteFsChanged(payload)`, and **`settings.changed`** via `applyConfig(config)` — the post-startup server-synced app config broadcast;
   welcome config lands in the atomic install above.
 
-  **Activity hydrates on welcome, and retires there too.** Alongside the workspace re-read, every welcome
-  runs `session.activityList` → `hydrateSessionActivity(rows)` under the same connection-generation fence,
-  because `session.activity` pushes are never replayed and a reconnecting surface would otherwise render a
-  rail from before the outage.
-
-  A generation fence alone is **not** enough, because the collision is *within* one connection:
-  `activityHydration` therefore **buffers pushes for the duration of the read** and replays them, in
-  arrival order, immediately after the snapshot installs. Without it a push that lands while the request is
-  in flight is silently reverted by a snapshot the host computed before it — leaving a wrong glyph until
-  that session next changes. Same shape as the Pi-event batcher above: the transport owns push *ordering*,
-  the store stays a plain fold. Reads are tokenized so a stale response cannot settle over a newer one; a
-  **failed** read still replays its buffer (no snapshot arrived, so those pushes are the only truth left),
-  while a **superseded generation** discards it (a fresh welcome is already re-reading, and replaying a
-  dead connection's pushes would resurrect stale rows). Both settle *and* failure are generation-fenced for
-  that reason — `WsTransport` **resends** pending requests across a reconnect, so an outcome can arrive
-  after the connection it was issued on is gone.
-
-  The unsupported-welcome path additionally **abandons** any in-flight hydration before clearing, and that
-  ordering is load-bearing: a v60 read can be in flight with pushes buffered when the endpoint reconnects
-  to a pre-activity host, whose rejection of the resent `session.activityList` would otherwise replay those
-  pushes *after* the clear — stranding a glyph the older host can never retract. `abandon` invalidates the
-  read's token, so its late settle or failure is inert. The capability gate is **`supportsSessionActivity(protocolVersion)`**
-  (`ACTIVITY_PROTOCOL_VERSION`), and failing it does **not** skip the call: it hydrates `[]`, so a surface
-  that has seen a newer host and then reconnects to an older one clears its glyphs rather than stranding
-  them — that host can send neither a snapshot nor a retraction. Store semantics for the fold live in
-  [[submodule-web-store]]; the wire shape is [[module-contracts]]. Before `WsTransport` dispatches any response or non-Pi
-  push, `wireTransport` flushes queued Pi events synchronously; connection-status transitions do the same.
+  **Session state hydrates on every supported welcome.** `session.stateList` is tokenized by connection
+  generation and buffers `session.state` pushes until the complete snapshot returns, folds those full-record
+  replacements over their snapshot rows in arrival order, then installs the resulting authoritative map once.
+  That ordered snapshot-plus-buffer state resolves any deliberate chat activation recorded before a current
+  state row was available; later pushes cannot claim it. Current-generation failures retain the previous map and
+  pending activation while retrying with capped backoff; overflowing the
+  bounded push buffer restarts the complete read instead of growing without limit, while stale-generation
+  outcomes discard their buffers. Pending dialog records replay their exact request, and adding/opening a
+  workspace restarts the generation-guarded complete read so pre-existing disk sessions are included.
+  Unsupported hosts clear the map. The old `session.activityList` tombstone
+  is never requested by this client. Before `WsTransport` dispatches a state push, any queued Pi events flush
+  synchronously, so the runtime transcript/render state precedes the host state that refers to it;
+  connection-status transitions keep the same barrier.
   This dispatch barrier preserves cross-message order and the store's transcript-revision fence while still
   collapsing consecutive stream frames. All subscriptions happen once at init, never in component effects);
   `errorText.ts` (**`errorText(err, fallback?)`** — normalizes a rejected `request` (the host's error
@@ -124,14 +110,31 @@ batches high-frequency Pi events without allowing later wire messages to overtak
   than a caller convention).
 - **Public surface (barrel):** `initTransport`, `getTransport`, `prewarmWorkspaceSkillLoad`, the three
   skill-load-safe session request wrappers, `errorText`, `RequestError`, `wsErrorCode`, `ConnectionStatus`,
-  `TransportOptions`. `supportsSessionActivity` stays module-internal (its own tests import the file
-  directly) — no sibling decides the activity capability, this module does.
+  `TransportOptions`, `runHostUpdate`, `supportsHostUpdateRun`, `supportsPlanReview`,
+  `supportsPlanSummaryGeneration`, `supportsChangeMutations`, `supportsRichAnchors`. `runHostUpdate` is the typed empty host action
+  and `supportsHostUpdateRun` lets `Shell` inject it only for protocol v70+; `supportsPlanReview` is exported
+  because a sibling panel (`PlanPane`) gates the plan-review UI on it — an older host serves no
+  `todo.startReview`/`reviewAll`, so the client must not offer them; `supportsPlanSummaryGeneration` (v69) is
+  exported because `chat/useChatTodos` gates the auto-summary `todo.generateSummary` request on it — an older
+  host has no such method; `supportsChangeMutations` is exported because `DiffPane` must withhold every
+  `change.*` affordance before that protocol lands; `supportsRichAnchors` (`REVIEW_RICH_ANCHORS_PROTOCOL_VERSION`)
+  is exported because `panels/useReviewCommenting` refuses to send a `region`/`structural` draft to a host
+  that predates them — such a host stores the selector unvalidated and re-anchors it as if it were text, so
+  the comment would survive but mean something else; the refusal is a plain error toast at the one place
+  drafts become `review.commentAdd` requests, and line/whole-file drafts are unaffected. The byte-only
+  resource shape needs no gate: a host older than `RESOURCE_META_PROTOCOL_VERSION` answers `fs.readFile`
+  and `git.diffFile` without `meta`, which the panes read as "text" — exactly the surface that host's own
+  client showed — and `/blob` is only ever addressed for a side the host itself reported as byte-only.
 - **Allowed deps:** `contracts` (method maps, `WS_CHANNELS`, `Project` for welcome + `project.updated`, `SessionEventPayload`
   for `pi.event`, `ExtUiRequest` for `pi.extensionUi`, `Workspace` for `workspace.created`/`updated`,
   `WorkspaceRemoved` for `workspace.removed`, `SessionCreatedPayload` for `session.created`,
-  `SessionDeletedPayload` for `session.deleted`, `SessionActivityPayload` +
-  `ACTIVITY_PROTOCOL_VERSION` for `session.activity` and its snapshot gate, `provider.changed`, the empty addressed
-  `feedback.interview` invitation, `HostUpdateNotice` for `server.welcome` + `host.updateAvailable`,
+  `SessionDeletedPayload` for `session.deleted`,
+  `HOST_UPDATE_RUN_PROTOCOL_VERSION` + `Ack` + the typed `host.update` method for the CLI-host update action,
+  `PLAN_REVIEW_SUBAGENT_PROTOCOL_VERSION` for the `supportsPlanReview` gate,
+  `CHANGE_MUTATIONS_PROTOCOL_VERSION` for the diff-mutation gate, `REVIEW_RICH_ANCHORS_PROTOCOL_VERSION`
+  for the rich-anchor authoring gate, `provider.changed`, the empty
+  addressed `feedback.interview` invitation, `HostUpdateNotice` for `server.welcome` +
+  `host.updateAvailable`,
   `WorkspaceFsChangedPayload` for `workspace.fsChanged`, and `AppConfig` for `server.welcome`'s config +
   `settings.changed`); `store`
   (welcome + event routing — a runtime edge owned by the parent graph); `lib` (plain-HTTP-safe random page

@@ -9,7 +9,14 @@ import {
 	type LayoutPreset,
 } from "@thinkrail/contracts";
 import { validateCustomLayoutPresets } from "./layoutPresets";
-import { getConfig, resetConfigCache, setSettingsPublisher, updateConfig } from "./settings";
+import {
+	getConfig,
+	noteRecentModel,
+	resetConfigCache,
+	type SettingsPublisher,
+	setSettingsPublisher,
+	updateConfig,
+} from "./settings";
 
 let dataDir: string;
 const savedDataDir = process.env.THINKRAIL_DATA_DIR;
@@ -226,11 +233,12 @@ test("invalid theme updates are rejected and a legacy theme choice exits system 
 	expect(fixed.systemThemePair).toEqual(pair);
 });
 
-test("updateConfig broadcasts the new config through the injected publisher", () => {
-	const seen: string[] = [];
-	setSettingsPublisher((c) => seen.push(c.theme));
-	updateConfig({ theme: "acme.broadcast" });
-	expect(seen).toEqual(["acme.broadcast"]);
+test("updateConfig publishes both the merged config and the successful applied update", () => {
+	const seen: Array<{ config: AppConfig; update: AppConfigUpdate }> = [];
+	const publisher: SettingsPublisher = (config, update) => seen.push({ config, update });
+	setSettingsPublisher(publisher);
+	const config = updateConfig({ theme: "acme.broadcast" });
+	expect(seen).toEqual([{ config, update: { theme: "acme.broadcast" } }]);
 });
 
 test("a null publisher makes updates silent no-ops (still persisted)", () => {
@@ -284,15 +292,28 @@ test("retired chat message order is stripped from disk and stale updates", () =>
 	expect(onDisk).not.toHaveProperty("chatMessageOrder");
 });
 
-test("reviewAutoFix defaults on; an old config without it loads the default; toggling off round-trips", () => {
-	expect(DEFAULT_CONFIG.reviewAutoFix).toBe(true);
+test("reviewAutoFix defaults off; an old config without it loads the default; toggling on round-trips", () => {
+	expect(DEFAULT_CONFIG.reviewAutoFix).toBe(false);
 	writeFileSync(join(dataDir, "config.json"), JSON.stringify({ theme: "dark" }));
 	resetConfigCache();
-	expect(getConfig().reviewAutoFix).toBe(true);
-	const next = updateConfig({ reviewAutoFix: false });
-	expect(next.reviewAutoFix).toBe(false);
-	resetConfigCache();
 	expect(getConfig().reviewAutoFix).toBe(false);
+	const next = updateConfig({ reviewAutoFix: true });
+	expect(next.reviewAutoFix).toBe(true);
+	resetConfigCache();
+	expect(getConfig().reviewAutoFix).toBe(true);
+});
+
+test("agentReviewEnabled defaults off; an old config loads the default; toggling on round-trips; non-boolean rejected", () => {
+	expect(DEFAULT_CONFIG.agentReviewEnabled).toBe(false);
+	writeFileSync(join(dataDir, "config.json"), JSON.stringify({ theme: "dark" }));
+	resetConfigCache();
+	expect(getConfig().agentReviewEnabled).toBe(false);
+	const next = updateConfig({ agentReviewEnabled: true });
+	expect(next.agentReviewEnabled).toBe(true);
+	resetConfigCache();
+	expect(getConfig().agentReviewEnabled).toBe(true);
+	const invalid = { agentReviewEnabled: "nope" } as unknown as AppConfigUpdate;
+	expect(() => updateConfig(invalid)).toThrow("agentReviewEnabled must be a boolean");
 });
 
 test("subagents default on; an old config inherits that default; toggling off round-trips", () => {
@@ -453,6 +474,42 @@ test("a failed config write leaves the live cache and publisher unchanged", () =
 	expect(published).toEqual([]);
 });
 
+test("defaultModel/defaultEffort persist through the top-level partial merge", () => {
+	const model = {
+		id: "m",
+		name: "M",
+		provider: "p",
+		contextWindow: 1,
+		reasoning: false,
+		thinkingLevels: [],
+	};
+	updateConfig({ defaultModel: model, defaultEffort: "high" });
+	resetConfigCache();
+	expect(getConfig().defaultModel).toEqual(model);
+	expect(getConfig().defaultEffort).toBe("high");
+});
+
+test("null defaultModel/defaultEffort clear the overrides and persist them as unset", () => {
+	const model = {
+		id: "m",
+		name: "M",
+		provider: "p",
+		contextWindow: 1,
+		reasoning: false,
+		thinkingLevels: [],
+	};
+	updateConfig({ defaultModel: model, defaultEffort: "high" });
+	const next = updateConfig({ defaultModel: null, defaultEffort: null });
+	expect(next.defaultModel).toBeUndefined();
+	expect(next.defaultEffort).toBeUndefined();
+	resetConfigCache();
+	expect(getConfig().defaultModel).toBeUndefined();
+	expect(getConfig().defaultEffort).toBeUndefined();
+	const onDisk = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"));
+	expect(onDisk).not.toHaveProperty("defaultModel");
+	expect(onDisk).not.toHaveProperty("defaultEffort");
+});
+
 test("reviewModel/reviewEffort persist through the top-level partial merge", () => {
 	const model = {
 		id: "m",
@@ -551,4 +608,70 @@ test("stored custom presets keep only complete current-schema entries", () => {
 	);
 	resetConfigCache();
 	expect(getConfig().customLayoutPresets).toEqual([preset("valid")]);
+});
+
+const wireModel = (id: string, provider = "p") => ({
+	id,
+	name: id.toUpperCase(),
+	provider,
+	contextWindow: 1,
+	reasoning: false,
+	thinkingLevels: [],
+});
+
+test("favoriteModels persist as a whole list, deduped by provider/id", () => {
+	const published: AppConfig[] = [];
+	setSettingsPublisher((config) => published.push(config));
+	const next = updateConfig({
+		favoriteModels: [wireModel("a"), wireModel("b"), { ...wireModel("a"), name: "stale" }],
+	});
+	expect(next.favoriteModels.map((m) => m.id)).toEqual(["a", "b"]);
+	resetConfigCache();
+	expect(getConfig().favoriteModels.map((m) => m.id)).toEqual(["a", "b"]);
+	expect(published).toHaveLength(1);
+});
+
+test("a malformed favoriteModels list rejects the whole update before persisting", () => {
+	expect(() => updateConfig({ favoriteModels: [{ id: "x" }] as never })).toThrow(
+		"favoriteModels must be a list of models",
+	);
+	expect(() => updateConfig({ favoriteModels: "nope" as never })).toThrow();
+	expect(getConfig().favoriteModels).toEqual([]);
+});
+
+test("recentModels is host-owned: client writes are ignored, noteRecentModel caps and dedupes", () => {
+	updateConfig({ recentModels: [wireModel("client")] } as AppConfigUpdate);
+	expect(getConfig().recentModels).toEqual([]);
+	for (const id of ["a", "b", "c", "d", "e", "f"]) noteRecentModel(wireModel(id));
+	expect(getConfig().recentModels.map((m) => m.id)).toEqual(["f", "e", "d", "c", "b"]);
+	noteRecentModel(wireModel("d"));
+	expect(getConfig().recentModels.map((m) => m.id)).toEqual(["d", "f", "e", "c", "b"]);
+	noteRecentModel(wireModel("d", "other"));
+	expect(getConfig().recentModels.map((m) => `${m.provider}/${m.id}`)[0]).toBe("other/d");
+	resetConfigCache();
+	expect(getConfig().recentModels).toHaveLength(5);
+});
+
+test("stored favorites and recents survive reload while malformed ones fall back to empty", () => {
+	updateConfig({ favoriteModels: [wireModel("a")] });
+	noteRecentModel(wireModel("b"));
+	resetConfigCache();
+	expect(getConfig().favoriteModels.map((m) => m.id)).toEqual(["a"]);
+	expect(getConfig().recentModels.map((m) => m.id)).toEqual(["b"]);
+	writeFileSync(
+		join(dataDir, "config.json"),
+		JSON.stringify({ ...DEFAULT_CONFIG, favoriteModels: "x", recentModels: 3 }),
+	);
+	resetConfigCache();
+	expect(getConfig().favoriteModels).toEqual([]);
+	expect(getConfig().recentModels).toEqual([]);
+	writeFileSync(
+		join(dataDir, "config.json"),
+		JSON.stringify({
+			...DEFAULT_CONFIG,
+			favoriteModels: [wireModel("ok"), { id: 7 }, null, "junk", { provider: "p" }],
+		}),
+	);
+	resetConfigCache();
+	expect(getConfig().favoriteModels.map((m) => m.id)).toEqual(["ok"]);
 });

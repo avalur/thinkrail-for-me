@@ -7,15 +7,39 @@ import {
 	isTerminalWindowsShell,
 	isThemeMode,
 	LINE_WIDTH_COLUMNS,
+	RECENT_MODELS_LIMIT,
+	sameModel,
+	type WireModel,
 } from "@thinkrail/contracts";
 import { loadConfig, saveConfig } from "../persistence";
 import { normalizeStoredCustomLayoutPresets, validateCustomLayoutPresets } from "./layoutPresets";
 
-type SettingsPublisher = (config: AppConfig) => void;
+export type SettingsPublisher = (config: AppConfig, appliedUpdate: AppConfigUpdate) => void;
 type RuntimeAppConfigUpdate = AppConfigUpdate & {
 	chatMessageOrder?: unknown;
 	layout?: unknown;
+	recentModels?: unknown;
 };
+
+function isWireModelRef(value: unknown): value is WireModel {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.provider === "string" &&
+		record.provider.length > 0 &&
+		typeof record.id === "string" &&
+		record.id.length > 0 &&
+		typeof record.name === "string" &&
+		Array.isArray(record.thinkingLevels)
+	);
+}
+
+function validateFavoriteModels(value: unknown): WireModel[] {
+	if (!Array.isArray(value) || !value.every(isWireModelRef)) {
+		throw new Error("favoriteModels must be a list of models");
+	}
+	return value.filter((model, index) => value.findIndex((m) => sameModel(m, model)) === index);
+}
 
 let publishSettings: SettingsPublisher | null = null;
 
@@ -55,6 +79,8 @@ export function updateConfig(partial: AppConfigUpdate): AppConfig {
 		["fileLineWidthBounded", runtimeUpdate.fileLineWidthBounded],
 		["analyticsEnabled", runtimeUpdate.analyticsEnabled],
 		["analyticsConsentConfirmed", runtimeUpdate.analyticsConsentConfirmed],
+		["reviewAutoFix", runtimeUpdate.reviewAutoFix],
+		["agentReviewEnabled", runtimeUpdate.agentReviewEnabled],
 	] as const) {
 		if (value !== undefined && typeof value !== "boolean") {
 			throw new Error(`${name} must be a boolean`);
@@ -67,8 +93,12 @@ export function updateConfig(partial: AppConfigUpdate): AppConfig {
 		throw new Error("analytics consent must include the sharing preference");
 	}
 	const {
+		defaultModel,
+		defaultEffort,
 		reviewModel,
 		reviewEffort,
+		favoriteModels,
+		recentModels: _hostOwnedRecentModels,
 		customLayoutPresets,
 		subagentsEnabled,
 		theme,
@@ -131,7 +161,18 @@ export function updateConfig(partial: AppConfigUpdate): AppConfig {
 		...(customLayoutPresets === undefined
 			? {}
 			: { customLayoutPresets: validateCustomLayoutPresets(customLayoutPresets) }),
+		...(favoriteModels === undefined
+			? {}
+			: { favoriteModels: validateFavoriteModels(favoriteModels) }),
 	};
+	if (defaultModel !== undefined) {
+		if (defaultModel === null) delete next.defaultModel;
+		else next.defaultModel = defaultModel;
+	}
+	if (defaultEffort !== undefined) {
+		if (defaultEffort === null) delete next.defaultEffort;
+		else next.defaultEffort = defaultEffort;
+	}
 	if (reviewModel !== undefined) {
 		if (reviewModel === null) delete next.reviewModel;
 		else next.reviewModel = reviewModel;
@@ -142,7 +183,21 @@ export function updateConfig(partial: AppConfigUpdate): AppConfig {
 	}
 	saveConfig(next);
 	cached = next;
-	publishSettings?.(next);
+	publishSettings?.(next, runtimeUpdate);
+	return next;
+}
+
+/** Records an explicit model choice at the head of `recentModels` (deduped, capped), then publishes. */
+export function noteRecentModel(model: WireModel): AppConfig {
+	const current = getConfig();
+	const recentModels = [
+		model,
+		...current.recentModels.filter((candidate) => !sameModel(candidate, model)),
+	].slice(0, RECENT_MODELS_LIMIT);
+	const next: AppConfig = { ...current, recentModels };
+	saveConfig(next);
+	cached = next;
+	publishSettings?.(next, {});
 	return next;
 }
 

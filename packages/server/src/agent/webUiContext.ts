@@ -12,16 +12,19 @@ export function setExtUiPublisher(fn: (request: ExtUiRequest) => void): void {
 	publish = fn;
 }
 
+let stateChanged: (sessionId: string) => void = () => {};
+export function setExtUiStateChanged(fn: (sessionId: string) => void): void {
+	stateChanged = fn;
+}
+
 let seq = 0;
 const nextId = (): string => `extui_${++seq}`;
 
-let onPendingChange: (sessionId: string) => void = () => {};
-export function setExtUiPendingObserver(fn: (sessionId: string) => void): void {
-	onPendingChange = fn;
-}
+type DialogRequest = Extract<ExtUiRequest, { kind: "select" | "confirm" | "input" | "editor" }>;
 
 interface Pending {
 	sessionId: string;
+	request: DialogRequest;
 	finish: (value: string | boolean | null, dismiss: boolean) => void;
 }
 const pending = new Map<string, Pending>();
@@ -36,11 +39,11 @@ export function cancelExtUiForSession(sessionId: string): void {
 	}
 }
 
-export function hasPendingExtUiDialog(sessionId: string): boolean {
+export function pendingExtUiDialog(sessionId: string): DialogRequest | null {
 	for (const entry of pending.values()) {
-		if (entry.sessionId === sessionId) return true;
+		if (entry.sessionId === sessionId) return entry.request;
 	}
-	return false;
+	return null;
 }
 
 export function notifyExtUi(
@@ -74,7 +77,7 @@ export function notifyExtensionError(sessionId: string, error: ExtensionError): 
 
 export function createWebUiContext(sessionId: string): ExtensionUIContext {
 	const bridgeDialog = (
-		request: ExtUiRequest,
+		request: DialogRequest,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | boolean | null> =>
 		new Promise((resolve) => {
@@ -85,15 +88,15 @@ export function createWebUiContext(sessionId: string): ExtensionUIContext {
 				if (settled) return;
 				settled = true;
 				pending.delete(id);
+				stateChanged(sessionId);
 				if (timer) clearTimeout(timer);
 				opts?.signal?.removeEventListener("abort", onAbort);
 				if (dismiss) publish({ id, sessionId, kind: "dismiss" });
 				resolve(value);
-				onPendingChange(sessionId);
 			};
 			const onAbort = (): void => finish(null, true);
-			pending.set(id, { sessionId, finish });
-			onPendingChange(sessionId);
+			pending.set(id, { sessionId, request, finish });
+			stateChanged(sessionId);
 			if (opts?.signal) {
 				if (opts.signal.aborted) return finish(null, true);
 				opts.signal.addEventListener("abort", onAbort, { once: true });

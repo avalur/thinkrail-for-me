@@ -86,10 +86,6 @@ export function userText(content: UserMessage["content"]): string {
 		.join("");
 }
 
-export function isMarkdownPath(path: string): boolean {
-	return /\.(md|markdown)$/i.test(path);
-}
-
 export function normalizePath(path: string): string {
 	return path.replaceAll("\\", "/").replace(/^\.\/+/, "");
 }
@@ -174,13 +170,40 @@ function canvasNormalize(color: string): string {
 	return first === colorCanvas.fillStyle ? first : "";
 }
 
+function srgbColorToHex(color: string): string {
+	const component = "([+-]?(?:\\d*\\.)?\\d+(?:e[+-]?\\d+)?%?)";
+	const match = new RegExp(
+		`^color\\(srgb\\s+${component}\\s+${component}\\s+${component}(?:\\s*\\/\\s*${component})?\\)$`,
+		"i",
+	).exec(color);
+	if (!match) return "";
+	const fraction = (value: string | undefined, fallback: number): number => {
+		if (value === undefined) return fallback;
+		return value.endsWith("%") ? Number.parseFloat(value) / 100 : Number(value);
+	};
+	const values = [
+		fraction(match[1], 0),
+		fraction(match[2], 0),
+		fraction(match[3], 0),
+		fraction(match[4], 1),
+	];
+	if (values.some((value) => !Number.isFinite(value))) return "";
+	const channels = values.map((value) => Math.round(Math.min(1, Math.max(0, value)) * 255));
+	if (match[4] === undefined) channels.pop();
+	return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export function cssColorToHex(color: string): string {
 	const value = color.trim();
 	const short = /^#([0-9a-f]{3,4})$/i.exec(value)?.[1];
 	if (short) return `#${[...short].map((c) => c + c).join("")}`;
 	if (/^#([0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)) return value;
+	const directSrgb = srgbColorToHex(value);
+	if (directSrgb) return directSrgb;
 	const parsed = canvasNormalize(value);
 	if (parsed.startsWith("#")) return parsed;
+	const parsedSrgb = srgbColorToHex(parsed);
+	if (parsedSrgb) return parsedSrgb;
 	const [, r, g, b, a] = /^rgba\((\d+), (\d+), (\d+), ([\d.]+)\)$/.exec(parsed) ?? [];
 	const channels = [Number(r), Number(g), Number(b), Math.round(Number(a) * 255)];
 	if (channels.some((c) => !Number.isFinite(c))) return "";
@@ -211,18 +234,26 @@ export function hasPlatformModifier(
 		: event.ctrlKey && !event.metaKey;
 }
 
-export function platformShortcutLabel(key: string, platform = browserPlatform()): string {
-	return isApplePlatform(platform) ? `⌘${key}` : `Ctrl+${key}`;
+export function platformShortcutLabel(
+	key: string,
+	{ alt = false, platform = browserPlatform() }: { alt?: boolean; platform?: string } = {},
+): string {
+	if (isApplePlatform(platform)) return alt ? `⌥⌘${key}` : `⌘${key}`;
+	return alt ? `Ctrl+Alt+${key}` : `Ctrl+${key}`;
 }
 
-export function relativeTime(ms: number): string {
-	const s = Math.floor((Date.now() - ms) / 1000);
+export function relativeTime(ms: number, now: number): string {
+	const s = Math.floor((now - ms) / 1000);
 	if (s < 60) return "just now";
 	const m = Math.floor(s / 60);
 	if (m < 60) return `${m}m ago`;
 	const h = Math.floor(m / 60);
 	if (h < 24) return `${h}h ago`;
 	return `${Math.floor(h / 24)}d ago`;
+}
+
+export function isShellInert(value: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value);
 }
 
 export async function copyText(text: string): Promise<boolean> {

@@ -23,6 +23,8 @@
 		"@types/qrcode": "1.5.6",
 		"@whiskeysockets/baileys": "7.0.0-rc14",
 		"bun-pty": "0.4.10",
+		"jsonc-parser": "3.3.1",
+		"pi-background-commands": "workspace:*",
 		"pi-delegation": "workspace:*",
 		"pi-spec-graph": "workspace:*",
 		"pi-subagents": "workspace:*",

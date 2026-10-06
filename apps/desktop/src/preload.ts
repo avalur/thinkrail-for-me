@@ -1,12 +1,26 @@
-import type { NativeUpdateBridge, NativeUpdateState } from "@thinkrail/contracts";
+import type {
+	NativeUpdateBridge,
+	NativeUpdateState,
+	NativeWindowControlsBridge,
+	NativeWindowState,
+} from "@thinkrail/contracts";
 import Electrobun, { Electroview } from "electrobun/view";
+import { handlePageZoomShortcut, installPageZoomGestures } from "./pageZoom";
 import {
 	INITIAL_DESKTOP_PREFERENCES_GLOBAL,
 	isDesktopPreferenceKey,
 	isDesktopPreferenceValue,
 	STABLE_PREFERENCES_GLOBAL,
 } from "./preferenceAdapter";
+import { takePreloadGlobal } from "./preloadGlobals";
 import type { DesktopRpc } from "./rpc";
+import { installTitleBarDoubleClick } from "./titleBarDoubleClick";
+import {
+	createWindowChromeStyleWriter,
+	INITIAL_WINDOW_CHROME_GLOBAL,
+	NATIVE_WINDOW_CONTROLS_GLOBAL,
+	readWindowChromeFlag,
+} from "./windowChrome";
 
 interface DesktopPreferenceAdapter {
 	getItem(key: string): string | null;
@@ -14,7 +28,15 @@ interface DesktopPreferenceAdapter {
 	removeItem(key: string): void;
 }
 
+const initialWindowChrome = takePreloadGlobal(INITIAL_WINDOW_CHROME_GLOBAL);
+const windowChromeStyle = createWindowChromeStyleWriter(
+	() => document.documentElement?.style ?? null,
+);
+document.addEventListener("DOMContentLoaded", windowChromeStyle.flush, { once: true });
+windowChromeStyle.update(initialWindowChrome);
+
 const updateListeners = new Set<(state: NativeUpdateState) => void>();
+const windowStateListeners = new Set<(state: NativeWindowState) => void>();
 const rpc = Electroview.defineRPC<DesktopRpc>({
 	maxRequestTime: 5000,
 	handlers: {
@@ -23,14 +45,28 @@ const rpc = Electroview.defineRPC<DesktopRpc>({
 			updateStateChanged: (state) => {
 				for (const listener of updateListeners) listener(state);
 			},
+			windowChromeChanged: windowChromeStyle.update,
+			windowStateChanged: (state) => {
+				for (const listener of windowStateListeners) listener(state);
+			},
 		},
 	},
 });
 const electroview = new Electrobun.Electroview({ rpc });
+installTitleBarDoubleClick(window, () => electroview.rpc?.send.titleBarDoubleClick());
+window.addEventListener("keydown", (event) =>
+	handlePageZoomShortcut(event, navigator.platform, (action) => {
+		electroview.rpc?.send.pageZoomRequested({ action });
+	}),
+);
+installPageZoomGestures(window, navigator.platform, (gesture) => {
+	electroview.rpc?.send.pageZoomGestureRequested(gesture);
+});
 const globals = globalThis as typeof globalThis & Record<string, unknown>;
 const updateBridge: NativeUpdateBridge = Object.freeze({
 	getState: () => rpc.request.getUpdateState(),
 	checkForUpdates: () => rpc.request.checkForUpdates(),
+	downloadUpdate: () => rpc.request.downloadUpdate(),
 	restartToUpdate: () => rpc.request.restartToUpdate(),
 	subscribe: (listener: (state: NativeUpdateState) => void) => {
 		updateListeners.add(listener);
@@ -43,7 +79,25 @@ Object.defineProperty(globals, "__THINKRAIL_NATIVE_UPDATES__", {
 	configurable: false,
 	enumerable: false,
 });
-const injectedPreferences = Reflect.get(globals, INITIAL_DESKTOP_PREFERENCES_GLOBAL);
+if (readWindowChromeFlag(initialWindowChrome, "windowControls") === true) {
+	const windowControlsBridge: NativeWindowControlsBridge = Object.freeze({
+		getState: () => rpc.request.getWindowState(),
+		minimize: () => rpc.request.minimizeWindow(),
+		toggleMaximize: () => rpc.request.toggleMaximizeWindow(),
+		close: () => rpc.request.closeWindow(),
+		subscribe: (listener: (state: NativeWindowState) => void) => {
+			windowStateListeners.add(listener);
+			return () => windowStateListeners.delete(listener);
+		},
+	});
+	Object.defineProperty(globals, NATIVE_WINDOW_CONTROLS_GLOBAL, {
+		value: windowControlsBridge,
+		writable: false,
+		configurable: false,
+		enumerable: false,
+	});
+}
+const injectedPreferences = takePreloadGlobal(INITIAL_DESKTOP_PREFERENCES_GLOBAL);
 const preferences = new Map<string, string>();
 if (typeof injectedPreferences === "object" && injectedPreferences !== null) {
 	for (const key of Object.keys(injectedPreferences)) {
@@ -53,7 +107,6 @@ if (typeof injectedPreferences === "object" && injectedPreferences !== null) {
 		}
 	}
 }
-Reflect.deleteProperty(globals, INITIAL_DESKTOP_PREFERENCES_GLOBAL);
 const preferenceAdapter: DesktopPreferenceAdapter = Object.freeze({
 	getItem: (key: string) => (isDesktopPreferenceKey(key) ? (preferences.get(key) ?? null) : null),
 	setItem: (key: string, value: string) => {

@@ -14,6 +14,7 @@ import {
 	type TodoPlan as StoredPlan,
 	TodoStore,
 } from "pi-todos/core";
+import { suggestPlanSummary } from "../assist";
 import { gitStatus, listCommits, readCommitSubject, resolveListedCommit } from "../git";
 import { getWorkspace } from "../workspaces";
 import { enqueueTodoMutation, settleChangeArtifacts, unattributedChanges } from "./artifacts";
@@ -21,8 +22,8 @@ import { dropItemBaseline, readBaselines, removeSessionBaselines } from "./basel
 import {
 	clearAutoCycles,
 	clearReviewPending,
+	commitReviewTransition,
 	dropReviewRecord,
-	findWorkerSessionByReviewer,
 	markReviewPending,
 	putReviewRecord,
 	readAutoCycles,
@@ -30,8 +31,6 @@ import {
 	readReviewRecords,
 	removeSessionReviews,
 	restoreReviewRecord,
-	setAutoCycles,
-	setReviewerSession,
 	type TodoReviewRecord,
 } from "./reviews";
 
@@ -183,8 +182,6 @@ export async function listTodos(params: {
 	if (unattributed.length > 0) wire.unattributed = unattributed;
 	const adoptedCommits = await resolveAdoptedCommits(params.workspaceId, plan, records, pending);
 	if (adoptedCommits.length > 0) wire.adoptedCommits = adoptedCommits;
-	const reviewer = readReviewMeta(root, params.sessionId).reviewerSessionId;
-	if (reviewer) wire.reviewerSessionId = reviewer;
 	return wire;
 }
 
@@ -222,6 +219,66 @@ export function addTodo(params: {
 		};
 		if (params.note !== undefined) input.note = params.note;
 		return storeFor(params.workspaceId, params.sessionId).add(input);
+	});
+}
+
+const summaryInFlight = new Map<string, Promise<{ summary: string | null }>>();
+
+// The exact step set a draft was generated from: id + status + the fields fed to the model. Persist only
+// if the plan still matches this, so a draft never lands on a plan mutated (steps removed/replaced) mid-call.
+function planSummaryFingerprint(items: StoredItem[]): string {
+	return JSON.stringify(
+		items.map((t) => [t.id, t.status, t.title, t.summary ?? "", t.verification ?? ""]),
+	);
+}
+
+/**
+ * Auto-draft the plan-level summary when the plan is fully done but the agent left none. Best-effort:
+ * returns the existing note untouched, `{ summary: null }` when the plan isn't complete / generation
+ * fails, or the freshly generated + persisted note. The slow model call runs OUTSIDE the write lock; the
+ * final re-check + `setSummary` runs inside `enqueueTodoMutation` and never clobbers an agent-authored
+ * note, a plan that re-opened, or a plan whose step set changed mid-call (a fingerprint of the exact
+ * steps the draft was built from must still match). One in-flight generation per session; a concurrent
+ * caller shares its result.
+ */
+export async function generateTodoSummary(params: {
+	workspaceId: string;
+	sessionId: string;
+}): Promise<{ summary: string | null }> {
+	const { workspaceId, sessionId } = params;
+	const plan = storeFor(workspaceId, sessionId).read();
+	const existing = plan.summary?.trim();
+	if (existing) return { summary: existing };
+	const items = flatItems(plan);
+	if (items.length === 0 || items.some((t) => t.status !== "done")) return { summary: null };
+	const key = `${workspaceId}\u0000${sessionId}`;
+	const inFlight = summaryInFlight.get(key);
+	if (inFlight) return inFlight;
+	const generation = draftTodoSummary(workspaceId, sessionId, items).finally(() =>
+		summaryInFlight.delete(key),
+	);
+	summaryInFlight.set(key, generation);
+	return generation;
+}
+
+async function draftTodoSummary(
+	workspaceId: string,
+	sessionId: string,
+	items: StoredItem[],
+): Promise<{ summary: string | null }> {
+	const fingerprint = planSummaryFingerprint(items);
+	const text = await suggestPlanSummary(
+		items.map((t) => ({ title: t.title, summary: t.summary, verification: t.verification })),
+	);
+	if (!text) return { summary: null };
+	return await enqueueTodoMutation(workspaceId, () => {
+		const store = storeFor(workspaceId, sessionId);
+		const fresh = store.read();
+		if (fresh.summary?.trim()) return { summary: fresh.summary };
+		// Discard the draft unless the plan is still the exact all-done step set it was built from.
+		if (planSummaryFingerprint(flatItems(fresh)) !== fingerprint) return { summary: null };
+		store.setSummary(text);
+		return { summary: text };
 	});
 }
 
@@ -325,37 +382,17 @@ export function approveTodoReview(
 	ok: true;
 } {
 	const { root, item } = reviewableItem(params);
-	putReviewRecord(root, params.sessionId, params.id, {
-		state: "reviewed",
-		reviewedShas: reviewedWatermark(root, params.sessionId, params.id, item),
-		at: new Date().toISOString(),
-		...(by ? { reviewedBy: by } : {}),
+	commitReviewTransition(root, params.sessionId, params.id, {
+		record: {
+			state: "reviewed",
+			reviewedShas: reviewedWatermark(root, params.sessionId, params.id, item),
+			at: new Date().toISOString(),
+			...(by ? { reviewedBy: by } : {}),
+		},
+		autoCycles: "clear",
+		clearPending: true,
 	});
-	clearReviewPending(root, params.sessionId, params.id);
-	clearAutoCycles(root, params.sessionId, params.id);
 	return { ok: true } as const;
-}
-
-export function reviewerSessionFor(params: {
-	workspaceId: string;
-	sessionId: string;
-}): string | undefined {
-	return readReviewMeta(getWorkspace(params.workspaceId).worktreePath, params.sessionId)
-		.reviewerSessionId;
-}
-
-export function pinReviewerSession(
-	params: { workspaceId: string; sessionId: string },
-	reviewerId: string,
-): void {
-	setReviewerSession(getWorkspace(params.workspaceId).worktreePath, params.sessionId, reviewerId);
-}
-
-export function workerSessionForReviewer(
-	workspaceId: string,
-	reviewerId: string,
-): string | undefined {
-	return findWorkerSessionByReviewer(getWorkspace(workspaceId).worktreePath, reviewerId);
 }
 
 export function startTodoReview(params: { workspaceId: string; sessionId: string; id: string }): {
@@ -395,6 +432,14 @@ export function cancelTodoReview(params: {
 	clearReviewPending(getWorkspace(params.workspaceId).worktreePath, params.sessionId, params.id);
 }
 
+export function dropTodoReviewVerdict(params: {
+	workspaceId: string;
+	sessionId: string;
+	id: string;
+}): void {
+	dropReviewRecord(getWorkspace(params.workspaceId).worktreePath, params.sessionId, params.id);
+}
+
 export function recordAgentChangesRequested(params: {
 	workspaceId: string;
 	sessionId: string;
@@ -403,14 +448,16 @@ export function recordAgentChangesRequested(params: {
 	autoCycles: number;
 }): { item: StoredItem } {
 	const { root, item } = reviewableItem(params);
-	putReviewRecord(root, params.sessionId, params.id, {
-		state: "changes_requested",
-		reviewedShas: reviewedWatermark(root, params.sessionId, params.id, item),
-		...(params.note ? { feedback: params.note } : {}),
-		at: new Date().toISOString(),
+	commitReviewTransition(root, params.sessionId, params.id, {
+		record: {
+			state: "changes_requested",
+			reviewedShas: reviewedWatermark(root, params.sessionId, params.id, item),
+			...(params.note ? { feedback: params.note } : {}),
+			at: new Date().toISOString(),
+		},
+		autoCycles: params.autoCycles,
+		clearPending: true,
 	});
-	setAutoCycles(root, params.sessionId, params.id, params.autoCycles);
-	clearReviewPending(root, params.sessionId, params.id);
 	return { item };
 }
 
@@ -450,10 +497,11 @@ export function renderReviewPackage(
 			? `commit${shas.length === 1 ? "" : "s"} ${shas.map((s) => s.slice(0, 12)).join(", ")}${paths.length > 0 ? `; uncommitted paths: ${paths.join(", ")}` : ""}`
 			: `changed paths: ${paths.join(", ")}`;
 	const rereview = prior && fresh.length > 0 && fresh.length < shas.length;
+	// Facts-only reference — the reviewer role and output contract live in host/reviewerRole; see planReview.SPEC.
 	const adopted = adoptedCommitSha(item.id);
 	const subject = adopted
-		? `You are the REVIEWER for commit ${adopted.slice(0, 12)} ("${item.title}") of chat ${workerSessionId} — a branch commit that belongs to no plan step. Review the change set — you did not write this code.`
-		: `You are the REVIEWER for plan step ${item.id} ("${item.title}") of chat ${workerSessionId}. Review the change set — you did not write this code.`;
+		? `Commit ${adopted.slice(0, 12)} ("${item.title}") of chat ${workerSessionId} belongs to no plan step and awaits review.`
+		: `Plan step ${item.id} ("${item.title}") of chat ${workerSessionId} is done and awaits review.`;
 	const lines = [
 		subject,
 		"",
@@ -465,11 +513,9 @@ export function renderReviewPackage(
 		`Change set: ${changeSet}`,
 		...(rereview
 			? [
-					`RE-REVIEW: only ${fresh.map((s) => s.slice(0, 12)).join(", ")} is new since your last verdict — review only that delta. Earlier findings the fix addressed are resolved by the worker or excluded as stale; approve is blocked only by what's still open.`,
+					`RE-REVIEW: only ${fresh.map((s) => s.slice(0, 12)).join(", ")} is new since the last verdict — review only that delta. Earlier findings the fix addressed are resolved by the worker or excluded as stale; approve is blocked only by what's still open.`,
 				]
 			: []),
-		"",
-		"FIRST read the reviewing-changes skill and follow it exactly — it defines the review order (intent match, scope drift, verifying the verification claim, hallucinated APIs), how to file findings (add_review_comment, one per problem, severity-prefixed, evidence-cited), and the single review_verdict that ends this review.",
 	];
 	return lines.join("\n");
 }
@@ -481,6 +527,7 @@ export function requestTodoFix(params: {
 	feedback: string;
 }): {
 	pkg: string;
+	itemTitle: string;
 	previous: TodoReviewRecord | undefined;
 	requested: TodoReviewRecord;
 } {
@@ -495,7 +542,7 @@ export function requestTodoFix(params: {
 		requestId: randomUUID(),
 	};
 	const previous = putReviewRecord(root, params.sessionId, params.id, requested);
-	return { pkg: renderFixPackage(item, feedback), previous, requested };
+	return { pkg: renderFixPackage(item, feedback), itemTitle: item.title, previous, requested };
 }
 
 export function rollbackTodoFix(

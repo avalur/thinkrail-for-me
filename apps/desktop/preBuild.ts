@@ -88,7 +88,11 @@ export async function startDesktopHost(options) {
     portMode: "exact",
     staticDir: options.staticDir,
     appVersion: options.appVersion,
-    analytics: { channel: options.channel, build: "desktop" },
+    analytics: {
+      channel: options.channel,
+      build: "desktop",
+      ...(options.openExternal ? { openExternal: options.openExternal } : {}),
+    },
   });
 }
 `,
@@ -97,6 +101,8 @@ export async function startDesktopHost(options) {
 		"build",
 		generatedEntry,
 		"--target=bun",
+		"--define",
+		"PI_BUNDLED_NODE=true",
 		`--outfile=${join(runtimeDir, "server-runtime.ts")}`,
 	]);
 } finally {

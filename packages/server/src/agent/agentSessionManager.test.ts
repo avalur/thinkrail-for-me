@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, jest, test } from "bun:test";
 import {
-	appendFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -11,9 +11,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+	getCurrentSystemPrompt,
+	getCurrentTools,
 	InMemoryCredentialStore,
 	type Model,
 	type ModelsRefreshResult,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import {
 	createFauxCore,
@@ -22,7 +25,6 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { AgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
-	ActivityStatus,
 	AgentSettlement,
 	AskUserQuestionResult,
 	ExtUiRequest,
@@ -31,8 +33,10 @@ import type {
 } from "@thinkrail/contracts";
 import { isAskUserAnswersMessage } from "@thinkrail/contracts";
 import { defaultSessionDirFor, writeFixtureSession } from "../history/testFixtures";
+import { setTrashImplementationForTests } from "../trash";
 import {
 	abortSession,
+	acknowledgeCompletion,
 	answerQuestion,
 	buildSessionSettings,
 	clampThinkingForModel,
@@ -43,15 +47,18 @@ import {
 	disposeAllSessions,
 	ensureSessionAttached,
 	followUpSession,
-	getDefaultModel,
 	getSessionCommands,
 	getSessionMessages,
+	getSessionState,
 	getSessionStats,
 	hasSession,
+	initializeSessionStates,
 	listAvailableModels,
-	listSessionActivity,
+	listSessionStates,
 	listSessions,
+	nudgeSession,
 	promptSession,
+	refreshAgentReviewTool,
 	refreshAvailableModels,
 	refreshSubagentTools,
 	reloadSessionResources,
@@ -59,21 +66,19 @@ import {
 	removeSession,
 	removeWorkspaceSessions,
 	renameSession,
-	setActivityProjectResolver,
-	setSessionActivityPublisher,
+	setAgentReviewEnabledResolver,
 	setSessionCreatedPublisher,
 	setSessionDeletedPublisher,
 	setSessionManagerFactory,
+	setSessionProjectResolver,
 	setSessionPublisher,
 	setSubagentsEnabledResolver,
 	settleSessionsForShutdown,
 	steerSession,
-	syncSessionActivity,
 	toWireModel,
 } from "./agentSessionManager";
 import { ASK_STOPPED_ERROR, assessAnswerability } from "./askUserQuestion";
 import { configurePiRuntime } from "./piRuntime";
-import { setTrashImplementationForTests } from "./trash";
 import { setExtUiPublisher } from "./webUiContext";
 
 function modelDef(id: string) {
@@ -118,9 +123,19 @@ const cfg = (faux: typeof fauxA, id: string) => ({
 const events = new Map<string, unknown[]>();
 const seen = (id: string) => JSON.stringify(events.get(id) ?? []);
 
-function subagentToolState(context: { tools?: ReadonlyArray<{ name: string }> }): string {
-	const names = new Set((context.tools ?? []).map((tool) => tool.name));
+function subagentToolState(context: TranscriptContext): string {
+	const names = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
 	return names.has("Agent") && names.has("get_subagent_result") ? "SUBAGENTS_ON" : "SUBAGENTS_OFF";
+}
+
+function reviewToolState(context: TranscriptContext): string {
+	const names = new Set(getCurrentTools(context.messages).map((tool) => tool.name));
+	const toolActive = names.has("request_review");
+	// The guidance must track the tool: setActiveToolsByName rebuilds the prompt from active tools only.
+	const guidanceInPrompt = getCurrentSystemPrompt(context.messages).includes("request_review");
+	if (toolActive && guidanceInPrompt) return "REVIEW_ON";
+	if (!toolActive && !guidanceInPrompt) return "REVIEW_OFF";
+	return "REVIEW_INCONSISTENT";
 }
 
 const tmpDirs: string[] = [];
@@ -241,12 +256,15 @@ function gatedQuestionMessage(toolCallId: string, stopReason?: "length") {
 }
 
 let priorAgentDir: string | undefined;
+let priorDataDir: string | undefined;
 let priorOffline: string | undefined;
 let runtime: ModelRuntime;
 
 beforeAll(async () => {
 	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = tmpCwd("trpi-agentdir-");
+	priorDataDir = process.env.THINKRAIL_DATA_DIR;
+	process.env.THINKRAIL_DATA_DIR = tmpCwd("trpi-data-");
 
 	priorOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
@@ -261,6 +279,7 @@ beforeAll(async () => {
 
 	configurePiRuntime(runtime);
 	setSessionManagerFactory(() => SessionManager.inMemory());
+	setSessionProjectResolver((workspaceId) => `project-${workspaceId}`);
 	setSessionPublisher(({ sessionId, event }) => {
 		const list = events.get(sessionId) ?? [];
 		list.push(event);
@@ -273,6 +292,8 @@ afterAll(() => {
 	for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	if (priorDataDir === undefined) delete process.env.THINKRAIL_DATA_DIR;
+	else process.env.THINKRAIL_DATA_DIR = priorDataDir;
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 });
@@ -297,6 +318,24 @@ test("session creation publishes a domain summary for other frontends", async ()
 	} finally {
 		setSessionCreatedPublisher(() => {});
 	}
+});
+
+test("concurrent idle nudges reserve one prompt and queue the later wake-up", async () => {
+	fauxA.setResponses([fauxAssistantMessage("FIRST_NUDGE"), fauxAssistantMessage("SECOND_NUDGE")]);
+	const session = await createSession({
+		cwd: tmpCwd("trpi-nudge-admission-"),
+		workspaceId: "ws-nudge-admission",
+		model: toWireModel(fauxA.getModel()),
+	});
+	const first = nudgeSession(session.sessionId, "[thinkrail:todo-nudge] first");
+	const second = nudgeSession(session.sessionId, "[thinkrail:todo-nudge] second");
+	expect(first.disposition).toBe("prompted");
+	expect(second.disposition).toBe("queued");
+	await second.send();
+	await first.send();
+	expect(seen(session.sessionId)).toContain("FIRST_NUDGE");
+	expect(seen(session.sessionId)).toContain("SECOND_NUDGE");
+	removeSession(session.sessionId);
 });
 
 test("two sessions in two worktrees stream independently; disposing one leaves the other working", async () => {
@@ -333,6 +372,68 @@ test("two sessions in two worktrees stream independently; disposing one leaves t
 	expect((events.get(a.sessionId) ?? []).length).toBe(aEventsBefore);
 });
 
+test.each([
+	"removeSession",
+	"removeWorkspaceSessions",
+	"deleteSession",
+	"settleSessionsForShutdown",
+	"disposeAllSessions",
+])("%s cannot restart a queued continuation after aborting a native tool", async (teardown) => {
+	const cwd = tmpCwd("trpi-teardown-queue-");
+	const workspaceId = `ws-teardown-queue-${teardown}`;
+	const startedPath = join(cwd, "started");
+	const releasePath = join(cwd, "release");
+	let continuationCalls = 0;
+	fauxA.setResponses([
+		fauxAssistantMessage(
+			fauxToolCall("bash", {
+				command: `touch '${startedPath}'; while ! test -f '${releasePath}'; do sleep 0.02; done`,
+			}),
+		),
+		() => {
+			continuationCalls++;
+			return fauxAssistantMessage("QUEUED_CONTINUATION_RAN");
+		},
+	]);
+	setSessionManagerFactory((sessionCwd) => SessionManager.inMemory(sessionCwd));
+	const session = await createSession({ cwd, workspaceId, model: toWireModel(fauxA.getModel()) });
+	const prompting = promptSession(session.sessionId, "Wait in the native tool.");
+	prompting.catch(() => {});
+	try {
+		await waitForPath(startedPath);
+		await followUpSession(session.sessionId, "QUEUED_FOLLOW_UP");
+		expect((await getSessionMessages(session.sessionId, workspaceId, cwd)).summary).toMatchObject({
+			isStreaming: true,
+			queue: { steering: [], followUp: ["QUEUED_FOLLOW_UP"] },
+		});
+		switch (teardown) {
+			case "removeSession":
+				await removeSession(session.sessionId);
+				break;
+			case "removeWorkspaceSessions":
+				await removeWorkspaceSessions(workspaceId);
+				break;
+			case "deleteSession":
+				await deleteSession(session.sessionId, workspaceId, cwd);
+				break;
+			case "settleSessionsForShutdown":
+				await settleSessionsForShutdown();
+				break;
+			case "disposeAllSessions":
+				disposeAllSessions();
+				break;
+		}
+		await prompting;
+		expect(continuationCalls).toBe(0);
+		expect(seen(session.sessionId)).not.toContain("QUEUED_CONTINUATION_RAN");
+	} finally {
+		writeFileSync(releasePath, "");
+		await prompting.catch(() => {});
+		if (hasSession(session.sessionId)) await removeSession(session.sessionId);
+		setSessionManagerFactory(() => SessionManager.inMemory());
+	}
+});
+
 test("agent_settled carries the final attempt's terminal metadata", async () => {
 	fauxA.setResponses([
 		fauxAssistantMessage("incomplete", {
@@ -367,10 +468,135 @@ test("agent_settled carries the final attempt's terminal metadata", async () => 
 	});
 	const hydrated = await getSessionMessages(session.sessionId, "ws-settled", cwd);
 	expect(hydrated.summary.lastSettlement).toEqual(settled?.terminal);
+	expect(hydrated.summary.state).toMatchObject({
+		execution: "idle",
+		needsInput: null,
+		queuedCount: 0,
+		completion: { outcome: "failed" },
+		completionUnread: true,
+	});
+	expect(
+		getSessionState(session.sessionId).completion?.completionId.startsWith("completion:"),
+	).toBe(true);
+
+	await initializeSessionStates([{ id: "ws-settled", projectId: "p-settled", cwd }]);
+	const baseline = await listSessionStates([{ id: "ws-settled", projectId: "p-settled", cwd }]);
+	expect(baseline).toEqual([
+		expect.objectContaining({
+			sessionId: session.sessionId,
+			workspaceId: "ws-settled",
+			projectId: "p-settled",
+			state: expect.objectContaining({
+				completion: expect.objectContaining({ outcome: "failed" }),
+				completionUnread: false,
+			}),
+		}),
+	]);
+
+	fauxA.setResponses([fauxAssistantMessage("complete")]);
+	await promptSession(session.sessionId, "again");
+	const completionId = getSessionState(session.sessionId).completion?.completionId;
+	if (!completionId) throw new Error("settled run has no completion id");
+	expect(acknowledgeCompletion(session.sessionId, "stale").acknowledged).toBe(false);
+	expect(getSessionState(session.sessionId).completionUnread).toBe(true);
+	expect(acknowledgeCompletion(session.sessionId, completionId)).toMatchObject({
+		acknowledged: true,
+		record: { state: { completionUnread: false } },
+	});
+	expect(acknowledgeCompletion(session.sessionId, completionId).acknowledged).toBe(false);
+	await abortSession(session.sessionId);
+	expect(getSessionState(session.sessionId)).toMatchObject({
+		completion: { completionId, outcome: "succeeded" },
+		completionUnread: false,
+	});
 });
 
-test("a length-truncated questionnaire never registers as a live blocker", async () => {
-	setActivityProjectResolver(() => "project-length-ask");
+async function withFreshDataDir(run: (dataDir: string) => Promise<void>): Promise<void> {
+	const previousDataDir = process.env.THINKRAIL_DATA_DIR;
+	const dataDir = tmpCwd("trpi-fresh-data-");
+	process.env.THINKRAIL_DATA_DIR = dataDir;
+	try {
+		await run(dataDir);
+	} finally {
+		if (previousDataDir === undefined) delete process.env.THINKRAIL_DATA_DIR;
+		else process.env.THINKRAIL_DATA_DIR = previousDataDir;
+	}
+}
+
+function writeFinishedDiskSession(cwd: string): { id: string; dir: string } {
+	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
+	const { id } = writeFixtureSession(dir, {
+		cwd,
+		messages: [
+			{ role: "user", text: "hi", timestamp: 1_000 },
+			{ role: "assistant", text: "done", stopReason: "stop", timestamp: 1_001 },
+		],
+	});
+	return { id, dir };
+}
+
+for (const corrupt of ["session-receipts.json", "session-lifecycle.json"]) {
+	test(`an unreadable ${corrupt} is set aside and existing history re-baselines as read`, () =>
+		withFreshDataDir(async (dataDir) => {
+			const cwd = tmpCwd("trpi-corrupt-metadata-ws-");
+			const { id } = writeFinishedDiskSession(cwd);
+			writeFileSync(
+				join(dataDir, "session-lifecycle.json"),
+				JSON.stringify({ version: 1, completionBySession: {}, cancelledRunBySession: {} }),
+			);
+			writeFileSync(
+				join(dataDir, "session-receipts.json"),
+				JSON.stringify({ version: 1, baselineComplete: true, handledCompletionBySession: {} }),
+			);
+			writeFileSync(join(dataDir, corrupt), "");
+			const workspace = { id: "ws-corrupt-metadata", projectId: "p-corrupt-metadata", cwd };
+
+			await initializeSessionStates([workspace]);
+
+			expect(await listSessionStates([workspace])).toEqual([
+				expect.objectContaining({
+					sessionId: id,
+					state: expect.objectContaining({
+						completion: expect.objectContaining({ outcome: "succeeded" }),
+						completionUnread: false,
+					}),
+				}),
+			]);
+			const setAside = readdirSync(dataDir).filter((name) =>
+				name.startsWith(`${corrupt}.corrupt-`),
+			);
+			expect(setAside).toHaveLength(1);
+			for (const file of ["session-lifecycle.json", "session-receipts.json"]) {
+				expect(() => JSON.parse(readFileSync(join(dataDir, file), "utf8"))).not.toThrow();
+			}
+		}));
+}
+
+test("the startup baseline skips an unreadable transcript instead of failing", () =>
+	withFreshDataDir(async (dataDir) => {
+		const cwd = tmpCwd("trpi-baseline-broken-ws-");
+		const { id, dir } = writeFinishedDiskSession(cwd);
+		const broken = join(dir, "0_broken.jsonl");
+		writeFileSync(broken, "");
+		const workspace = { id: "ws-baseline-broken", projectId: "p-baseline-broken", cwd };
+
+		await initializeSessionStates([workspace]);
+
+		expect(JSON.parse(readFileSync(join(dataDir, "session-receipts.json"), "utf8"))).toMatchObject({
+			baselineComplete: true,
+			handledCompletionBySession: { [id]: expect.stringMatching(/^completion:/) },
+		});
+		await expect(listSessionStates([workspace])).rejects.toThrow("unreadable or malformed");
+		rmSync(broken);
+		expect(await listSessionStates([workspace])).toEqual([
+			expect.objectContaining({
+				sessionId: id,
+				state: expect.objectContaining({ completionUnread: false }),
+			}),
+		]);
+	}));
+
+test("a length-truncated questionnaire is terminal and cannot be answered", async () => {
 	let releaseContinuation = (): void => {};
 	const continuationGate = new Promise<void>((resolve) => {
 		releaseContinuation = resolve;
@@ -397,9 +623,6 @@ test("a length-truncated questionnaire never registers as a live blocker", async
 	const prompting = promptSession(session.sessionId, "Ask a question.");
 	try {
 		await continuationStarted;
-		expect(
-			(await listSessionActivity()).find((row) => row.sessionId === session.sessionId)?.status,
-		).toBe("running");
 		await expect(
 			answerQuestion(session.sessionId, toolCallId, { answers: [], cancelled: true }),
 		).rejects.toThrow("not awaiting an answer");
@@ -415,7 +638,6 @@ test("a length-truncated questionnaire never registers as a live blocker", async
 		releaseContinuation();
 		await prompting.catch(() => {});
 		removeSession(session.sessionId);
-		setActivityProjectResolver(() => null);
 	}
 });
 
@@ -512,6 +734,43 @@ test("an idle chat adopts subagent policy changes, survives resource reload, and
 		expect(seen(sessionId)).toContain("SUBAGENTS_ON");
 	} finally {
 		setSubagentsEnabledResolver(() => true);
+		if (sessionId) removeSession(sessionId);
+	}
+});
+
+test("an idle chat adopts an agent-review policy change live — request_review and its guidance drop and return", async () => {
+	const workspaceId = "ws-agent-review-idle-toggle";
+	let enabled = true;
+	setAgentReviewEnabledResolver((id) => id !== workspaceId || enabled);
+	let sessionId: string | undefined;
+	try {
+		const session = await createSession({
+			cwd: tmpCwd("trpi-agent-review-idle-toggle-"),
+			workspaceId,
+			model: toWireModel(fauxA.getModel()),
+		});
+		sessionId = session.sessionId;
+
+		// On by default: the tool is active and its guidance is in the (rebuilt) system prompt.
+		fauxA.setResponses([(context) => fauxAssistantMessage(reviewToolState(context))]);
+		await promptSession(sessionId, "Check enabled review tool.");
+		expect(seen(sessionId)).toContain("REVIEW_ON");
+
+		// Toggle off live: the tool leaves the active set AND its guidance leaves the rebuilt prompt.
+		enabled = false;
+		refreshAgentReviewTool(workspaceId);
+		fauxA.setResponses([(context) => fauxAssistantMessage(reviewToolState(context))]);
+		await promptSession(sessionId, "Check disabled review tool.");
+		expect(seen(sessionId)).toContain("REVIEW_OFF");
+
+		// And back on.
+		enabled = true;
+		refreshAgentReviewTool(workspaceId);
+		fauxA.setResponses([(context) => fauxAssistantMessage(reviewToolState(context))]);
+		await promptSession(sessionId, "Check re-enabled review tool.");
+		expect(seen(sessionId)).toContain("REVIEW_ON");
+	} finally {
+		setAgentReviewEnabledResolver(() => true);
 		if (sessionId) removeSession(sessionId);
 	}
 });
@@ -704,8 +963,35 @@ test("disabling an idle parent lets its running background child finish and deli
 	}
 });
 
-test("buildSessionSettings disables image autoResize (in-memory, so the read tool sends images raw)", () => {
-	expect(buildSessionSettings(tmpCwd("trpi-settings-")).getImageAutoResize()).toBe(false);
+test("buildSessionSettings disables image autoResize, and the override survives a settings.reload()", async () => {
+	const settings = buildSessionSettings(tmpCwd("trpi-settings-"));
+	expect(settings.getImageAutoResize()).toBe(false);
+	await settings.reload();
+	expect(settings.getImageAutoResize()).toBe(false);
+});
+
+test("a prompt image reaches the transcript raw — the autoResize override survives pi's loader reload", async () => {
+	fauxA.setResponses([fauxAssistantMessage("IMAGE_ACK")]);
+	const cwd = tmpCwd("trpi-raw-image-");
+	const s = await createSession({
+		cwd,
+		workspaceId: "ws-raw-image",
+		model: toWireModel(fauxA.getModel()),
+	});
+	try {
+		const rawImageData = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+		await promptSession(s.sessionId, "describe this", [
+			{ type: "image", mimeType: "image/png", data: rawImageData },
+		]);
+		const transcript = await getSessionMessages(s.sessionId, "ws-raw-image", cwd);
+		const userMessage = transcript.messages.find((message) => message.role === "user");
+		expect(userMessage?.content).toEqual([
+			{ type: "text", text: "describe this" },
+			{ type: "image", mimeType: "image/png", data: rawImageData },
+		]);
+	} finally {
+		await removeSession(s.sessionId);
+	}
 });
 
 test("listAvailableModels returns the configured (faux) models", async () => {
@@ -773,14 +1059,19 @@ test("wire models expose only the allowlisted fields (no baseUrl/headers/other M
 	expect(models.length).toBeGreaterThan(0);
 	for (const m of models) {
 		expect(Object.keys(m).sort()).toEqual([
+			"auth",
 			"contextWindow",
+			"cost",
 			"id",
+			"input",
 			"name",
 			"provider",
 			"reasoning",
 			"thinkingLevels",
 		]);
 		expect(m.thinkingLevels).toEqual(["off"]);
+		expect(Object.keys(m.cost ?? {}).sort()).toEqual(["input", "output"]);
+		expect(m.auth?.kind).toBeDefined();
 	}
 });
 
@@ -831,58 +1122,6 @@ test("model.clampThinking refuses a model ref the host can't resolve", async () 
 	await expect(clampThinkingForModel({ provider: "nope", id: "nope" }, "high")).rejects.toThrow(
 		/Unknown or unavailable model/,
 	);
-});
-
-test("model.default clamps the saved thinking level onto the pinned model's support set", async () => {
-	const agentDir = process.env.PI_CODING_AGENT_DIR;
-	if (!agentDir) throw new Error("agent dir not isolated");
-	const settingsPath = join(agentDir, "settings.json");
-	writeFileSync(
-		settingsPath,
-		`${JSON.stringify({
-			defaultProvider: "fauxa",
-			defaultModel: "fauxa",
-			defaultThinkingLevel: "high",
-		})}\n`,
-	);
-	try {
-		const d = await getDefaultModel();
-		expect(d.model?.id).toBe("fauxa");
-		expect(d.model?.thinkingLevels).toEqual(["off"]);
-		expect(d.thinkingLevel).toBe("off");
-	} finally {
-		rmSync(settingsPath, { force: true });
-	}
-});
-
-test("model.default names NO model when nothing is pinned — pi's resolver is the only one", async () => {
-	const agentDir = process.env.PI_CODING_AGENT_DIR;
-	if (!agentDir) throw new Error("agent dir not isolated");
-	const settingsPath = join(agentDir, "settings.json");
-	writeFileSync(settingsPath, `${JSON.stringify({ defaultThinkingLevel: "high" })}\n`);
-	try {
-		expect((await listAvailableModels()).length).toBeGreaterThan(0);
-		const d = await getDefaultModel();
-		expect(d.model).toBeNull();
-		expect(d.thinkingLevel).toBe("high");
-	} finally {
-		rmSync(settingsPath, { force: true });
-	}
-});
-
-test("model.default names NO model when the pinned one is unavailable", async () => {
-	const agentDir = process.env.PI_CODING_AGENT_DIR;
-	if (!agentDir) throw new Error("agent dir not isolated");
-	const settingsPath = join(agentDir, "settings.json");
-	writeFileSync(
-		settingsPath,
-		`${JSON.stringify({ defaultProvider: "fauxa", defaultModel: "gone" })}\n`,
-	);
-	try {
-		expect((await getDefaultModel()).model).toBeNull();
-	} finally {
-		rmSync(settingsPath, { force: true });
-	}
 });
 
 test("model.refresh serves the same redacted universe as model.list (post-refresh snapshot)", async () => {
@@ -1041,9 +1280,11 @@ test("graceful shutdown persists an accepted answer and aborts its continuation"
 	prompting.catch(() => {});
 	try {
 		await waitForPath(gate.startedPath);
+		await followUpSession(session.sessionId, "QUEUED_BEFORE_SHUTDOWN");
 		const result = gatedQuestionAnswer();
 		const answering = answerQuestion(session.sessionId, toolCallId, result);
 		const settling = settleSessionsForShutdown(1000);
+		await followUpSession(session.sessionId, "QUEUED_DURING_SHUTDOWN");
 		gate.release();
 		await Promise.all([answering, settling, prompting]);
 		const transcript = await getSessionMessages(session.sessionId, "ws-shutdown-accepted", cwd);
@@ -1051,13 +1292,74 @@ test("graceful shutdown persists an accepted answer and aborts its continuation"
 			(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
 		);
 		if (persisted?.role !== "toolResult") throw new Error("native result was not persisted");
-		expect(persisted.details).toEqual(result);
+		expect(persisted.details).toEqual<AskUserQuestionResult>(result);
 		expect(seen(session.sessionId)).not.toContain("SHUTDOWN_CONTINUATION_RAN");
+		expect(transcript.messages.filter((message) => message.role === "user")).toHaveLength(1);
 	} finally {
 		gate.release();
 		gate.remove();
 		await prompting.catch(() => {});
 		if (hasSession(session.sessionId)) removeSession(session.sessionId);
+	}
+});
+
+test.each([
+	"removeSession",
+	"removeWorkspaceSessions",
+	"archiveDuringDelete",
+])("%s drains queued input while allowing an accepted answer to persist", async (teardown) => {
+	const gate = installAskToolGate(`ask-${teardown}-accepted-gate`);
+	const toolCallId = `accepted-on-${teardown}`;
+	const cwd = tmpCwd("trpi-removal-accepted-");
+	const manager = SessionManager.inMemory(cwd);
+	setSessionManagerFactory(() => manager);
+	fauxA.setResponses([
+		gatedQuestionMessage(toolCallId),
+		fauxAssistantMessage("REMOVAL_CONTINUATION_RAN"),
+	]);
+	const session = await createSession({
+		cwd,
+		workspaceId: "ws-removal-accepted",
+		model: toWireModel(fauxA.getModel()),
+	});
+	const prompting = promptSession(session.sessionId, "Ask before continuing.");
+	prompting.catch(() => {});
+	try {
+		await waitForPath(gate.startedPath);
+		await followUpSession(session.sessionId, "QUEUED_BEFORE_REMOVAL");
+		const result = gatedQuestionAnswer();
+		const answering = answerQuestion(session.sessionId, toolCallId, result);
+		const removing =
+			teardown === "removeSession"
+				? removeSession(session.sessionId)
+				: teardown === "removeWorkspaceSessions"
+					? removeWorkspaceSessions("ws-removal-accepted")
+					: Promise.all([
+							deleteSession(session.sessionId, "ws-removal-accepted", cwd),
+							removeWorkspaceSessions("ws-removal-accepted"),
+						]);
+		if (teardown === "archiveDuringDelete") {
+			await expect(abortSession(session.sessionId, true)).rejects.toThrow("Unknown session");
+		} else {
+			await followUpSession(session.sessionId, "QUEUED_DURING_REMOVAL");
+		}
+		gate.release();
+		await Promise.all([answering, removing, prompting]);
+		const messages = manager.buildSessionContext().messages;
+		const persisted = messages.find(
+			(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
+		);
+		if (persisted?.role !== "toolResult") throw new Error("native result was not persisted");
+		expect(JSON.stringify(persisted.details)).toBe(JSON.stringify(result));
+		expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(seen(session.sessionId)).not.toContain("REMOVAL_CONTINUATION_RAN");
+		expect(hasSession(session.sessionId)).toBe(false);
+	} finally {
+		gate.release();
+		gate.remove();
+		if (hasSession(session.sessionId)) await removeSession(session.sessionId);
+		await prompting.catch(() => {});
+		setSessionManagerFactory(() => SessionManager.inMemory());
 	}
 });
 
@@ -1103,7 +1405,7 @@ test("an answer accepted before execute persists before Stop aborts the continua
 			(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
 		);
 		if (persisted?.role !== "toolResult") throw new Error("native result was not persisted");
-		expect(persisted.details).toEqual(result);
+		expect(persisted.details).toEqual<AskUserQuestionResult>(result);
 		expect(persisted.isError).toBe(false);
 	} finally {
 		gate.release();
@@ -1148,7 +1450,7 @@ test("Stop claims an expected question before a late answer can win", async () =
 	}
 });
 
-test("direct session disposal rejects an accepted answer that cannot persist", async () => {
+test("emergency session disposal rejects an accepted answer that cannot persist", async () => {
 	const gate = installAskToolGate("ask-dispose-gate");
 	const toolCallId = "dispose-after-answer";
 	fauxA.setResponses([gatedQuestionMessage(toolCallId)]);
@@ -1165,7 +1467,7 @@ test("direct session disposal rejects an accepted answer that cannot persist", a
 			answers: [],
 			cancelled: true,
 		});
-		await removeSession(session.sessionId);
+		disposeAllSessions();
 		await expect(answering).rejects.toThrow("Session disposed while waiting for a question");
 	} finally {
 		gate.release();
@@ -1176,9 +1478,6 @@ test("direct session disposal rejects an accepted answer that cannot persist", a
 });
 
 test("a live question blocks continuation, preserves queue order, and acknowledges after its native result persists", async () => {
-	setActivityProjectResolver(() => "project-live-question");
-	const activityStatuses: (ActivityStatus | null)[] = [];
-	setSessionActivityPublisher(({ status }) => activityStatuses.push(status));
 	const toolCallId = "live-question";
 	const question = {
 		questions: [
@@ -1225,10 +1524,9 @@ test("a live question blocks continuation, preserves queue order, and acknowledg
 			await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 		expect(seen(session.sessionId)).toContain('"toolName":"ask_user_question"');
-		expect(
-			(await listSessionActivity()).find((row) => row.sessionId === session.sessionId)?.status,
-		).toBe("waiting");
-		expect(activityStatuses).toContain("waiting");
+		const nudge = nudgeSession(session.sessionId, "[thinkrail:todo-nudge] ignored");
+		expect(nudge.disposition).toBe("needs_input");
+		await nudge.send();
 		await steerSession(session.sessionId, "QUEUED_WHILE_ASKING");
 		await Promise.resolve();
 		expect(continuationCalls).toBe(0);
@@ -1254,7 +1552,7 @@ test("a live question blocks continuation, preserves queue order, and acknowledg
 		);
 		expect(persistedResult).toBeDefined();
 		if (persistedResult?.role !== "toolResult") throw new Error("native result was not persisted");
-		expect(persistedResult.details).toEqual(result);
+		expect(persistedResult.details).toEqual<AskUserQuestionResult>(result);
 		expect(messages.some((message) => message.role === "custom")).toBe(false);
 		expect(continuationContext.indexOf('"role":"toolResult"')).toBeLessThan(
 			continuationContext.indexOf("QUEUED_WHILE_ASKING"),
@@ -1265,8 +1563,6 @@ test("a live question blocks continuation, preserves queue order, and acknowledg
 	} finally {
 		releaseContinuation();
 		removeSession(session.sessionId);
-		setSessionActivityPublisher(() => {});
-		setActivityProjectResolver(() => null);
 	}
 });
 
@@ -1319,7 +1615,7 @@ test("an accepted answer persists and its RPC settles when Stop races before tur
 			(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
 		);
 		if (persisted?.role !== "toolResult") throw new Error("answer result was not persisted");
-		expect(persisted.details).toEqual(result);
+		expect(persisted.details).toEqual<AskUserQuestionResult>(result);
 		expect(persisted.isError).toBe(false);
 		expect(transcript.messages.some((message) => isAskUserAnswersMessage(message))).toBe(false);
 	} finally {
@@ -1357,7 +1653,7 @@ test("Stop bounds a stalled post-tool hook and rejects an answer that did not pe
 		);
 		if (persisted?.role !== "toolResult") throw new Error("stopped result was not persisted");
 		expect(persisted.isError).toBe(false);
-		expect(persisted.details).toEqual(gatedQuestionAnswer());
+		expect(persisted.details).toEqual<AskUserQuestionResult>(gatedQuestionAnswer());
 		expect(persisted.content).toEqual([{ type: "text", text: "post-tool result replaced" }]);
 	} finally {
 		hook.remove();
@@ -1556,6 +1852,76 @@ test("graceful settling leaves a live question dangling for restart ack repair",
 	}
 });
 
+test("disposing a session mid-run reports pi's stale-boundary errors at debug, never as a client-visible extension crash", async () => {
+	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
+	const toolCallId = "dispose-mid-run-question";
+	const cwd = tmpCwd("trpi-dispose-mid-run-");
+	fauxA.setResponses([
+		fauxAssistantMessage(
+			fauxToolCall(
+				"ask_user_question",
+				{
+					questions: [
+						{
+							question: "Dispose while waiting?",
+							header: "Dispose",
+							options: [
+								{ label: "Yes", description: "dispose" },
+								{ label: "No", description: "keep waiting" },
+							],
+						},
+					],
+				},
+				{ id: toolCallId },
+			),
+		),
+	]);
+	const session = await createSession({
+		cwd,
+		workspaceId: "ws-dispose-mid-run",
+		model: toWireModel(fauxA.getModel()),
+	});
+	const prompting = promptSession(session.sessionId, "Ask before disposal.");
+	prompting.catch(() => {});
+	const frames: ExtUiRequest[] = [];
+	setExtUiPublisher((frame) => frames.push(frame));
+	const stderrChunks: string[] = [];
+	const originalStderrWrite = process.stderr.write;
+	process.stderr.write = (chunk) => {
+		stderrChunks.push(String(chunk));
+		return true;
+	};
+	try {
+		for (let attempt = 0; attempt < 100; attempt++) {
+			if (seen(session.sessionId).includes('"toolName":"ask_user_question"')) break;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		const framesAtDisposal = frames.length;
+		disposeAllSessions();
+		await prompting.catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, 200));
+
+		const stderr = stderrChunks.join("");
+		expect(stderr).not.toMatch(/WARN[^\n]*This extension ctx is stale/);
+		expect(stderr).not.toMatch(/WARN[^\n]*could not resolve the persisted assistant entry ID/);
+		expect(
+			frames
+				.slice(framesAtDisposal)
+				.some(
+					(frame) =>
+						frame.sessionId === session.sessionId &&
+						frame.kind === "notify" &&
+						frame.level === "error",
+				),
+		).toBe(false);
+	} finally {
+		process.stderr.write = originalStderrWrite;
+		setExtUiPublisher(() => {});
+		if (hasSession(session.sessionId)) removeSession(session.sessionId);
+		setSessionManagerFactory(() => SessionManager.inMemory());
+	}
+});
+
 test("listSessions reports a workspace's live sessions; getSessionMessages returns its transcript", async () => {
 	fauxA.setResponses([fauxAssistantMessage("HYDRATE_REPLY")]);
 	const cwd = tmpCwd("trpi-hyd-");
@@ -1721,7 +2087,7 @@ test("disk-reopen: a disposed session is re-listed from disk and re-opened with 
 			model: fauxA.getModel() as any,
 		});
 		await promptSession(s.sessionId, "persist me");
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 
 		const fromDisk = (await listSessions("ws-disk", cwd)).find((x) => x.sessionId === s.sessionId);
 		expect(fromDisk).toBeDefined();
@@ -1735,7 +2101,7 @@ test("disk-reopen: a disposed session is re-listed from disk and re-opened with 
 		const { summary, messages } = await getSessionMessages(s.sessionId, "ws-disk", cwd);
 		expect(summary.live).toBe(true);
 		expect(messages.some((m) => m.role === "user")).toBe(true);
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 
 		const [a, b] = await Promise.all([
 			getSessionMessages(s.sessionId, "ws-disk", cwd),
@@ -1745,7 +2111,7 @@ test("disk-reopen: a disposed session is re-listed from disk and re-opened with 
 		expect(
 			(await listSessions("ws-disk", cwd)).filter((x) => x.sessionId === s.sessionId),
 		).toHaveLength(1);
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 	} finally {
 		setSessionManagerFactory(() => SessionManager.inMemory());
 	}
@@ -1840,6 +2206,9 @@ test("a malformed detached transcript is never treated as authoritative absence"
 		writeFileSync(info.path, "not a pi transcript\n");
 
 		await expect(listSessions("ws-delete-corrupt", cwd)).rejects.toThrow("unreadable or malformed");
+		await expect(
+			listSessionStates([{ id: "ws-delete-corrupt", projectId: "p-delete-corrupt", cwd }]),
+		).rejects.toThrow("unreadable or malformed");
 		await expect(deleteSession(session.sessionId, "ws-delete-corrupt", cwd)).rejects.toThrow(
 			"unreadable or malformed",
 		);
@@ -2027,7 +2396,7 @@ test("ensureSessionAttached: a detached-but-persisted session comes back live; a
 			model: toWireModel(fauxA.getModel()),
 		});
 		await promptSession(s.sessionId, "the review package");
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 		expect(hasSession(s.sessionId)).toBe(false);
 
 		expect(await ensureSessionAttached(s.sessionId, "ws-reattach", cwd)).toBe(true);
@@ -2035,7 +2404,7 @@ test("ensureSessionAttached: a detached-but-persisted session comes back live; a
 		expect(await ensureSessionAttached(s.sessionId, "ws-reattach", cwd)).toBe(true);
 
 		expect(await ensureSessionAttached("no-such-session", "ws-reattach", cwd)).toBe(false);
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 	} finally {
 		setSessionManagerFactory(() => SessionManager.inMemory());
 	}
@@ -2052,13 +2421,13 @@ test("followUpSession on an IDLE session runs the turn — pi's follow-up queue 
 			model: toWireModel(fauxA.getModel()),
 		});
 		await promptSession(s.sessionId, "batch one");
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 		expect(await ensureSessionAttached(s.sessionId, "ws-followup", cwd)).toBe(true);
 
 		fauxA.appendResponses([fauxAssistantMessage("SECOND_BATCH")]);
 		await followUpSession(s.sessionId, "batch two");
 		expect(seen(s.sessionId)).toContain("SECOND_BATCH");
-		removeSession(s.sessionId);
+		await removeSession(s.sessionId);
 	} finally {
 		setSessionManagerFactory(() => SessionManager.inMemory());
 	}
@@ -2168,7 +2537,6 @@ test("a delivered image-only steer clears its queue chip despite pi's empty-text
 	});
 	const cwd = tmpCwd("trpi-steer-image-");
 	writeFileSync(join(cwd, "probe.txt"), "probe\n");
-	setActivityProjectResolver(() => "project-steer-image");
 	try {
 		slow.setResponses([
 			async () => {
@@ -2207,8 +2575,6 @@ test("a delivered image-only steer clears its queue chip despite pi's empty-text
 			(await listSessions("ws-steer-image", cwd)).find((row) => row.sessionId === s.sessionId)
 				?.queue,
 		).toBeUndefined();
-		const activity = await listSessionActivity([{ id: "ws-steer-image", cwd }]);
-		expect(activity.find((a) => a.sessionId === s.sessionId)?.status).not.toBe("queued");
 
 		const queueEvents = (events.get(s.sessionId) ?? []).filter(
 			(event): event is { type: "queue_update"; steering: string[] } =>
@@ -2221,7 +2587,6 @@ test("a delivered image-only steer clears its queue chip despite pi's empty-text
 		removeSession(s.sessionId);
 	} finally {
 		release();
-		setActivityProjectResolver(() => null);
 		runtime.unregisterProvider("faux-steer-image");
 	}
 }, 20000);
@@ -2243,7 +2608,6 @@ test("a delivered image-only follow-up clears its queue chip despite pi's empty-
 		started = resolve;
 	});
 	const cwd = tmpCwd("trpi-followup-image-");
-	setActivityProjectResolver(() => "project-followup-image");
 	try {
 		slow.setResponses([
 			async () => {
@@ -2282,8 +2646,6 @@ test("a delivered image-only follow-up clears its queue chip despite pi's empty-
 			(await listSessions("ws-followup-image", cwd)).find((row) => row.sessionId === s.sessionId)
 				?.queue,
 		).toBeUndefined();
-		const activity = await listSessionActivity([{ id: "ws-followup-image", cwd }]);
-		expect(activity.find((a) => a.sessionId === s.sessionId)?.status).not.toBe("queued");
 
 		const queueEvents = (events.get(s.sessionId) ?? []).filter(
 			(event): event is { type: "queue_update"; followUp: string[] } =>
@@ -2296,7 +2658,6 @@ test("a delivered image-only follow-up clears its queue chip despite pi's empty-
 		removeSession(s.sessionId);
 	} finally {
 		release();
-		setActivityProjectResolver(() => null);
 		runtime.unregisterProvider("faux-followup-image");
 	}
 }, 20000);
@@ -2535,333 +2896,5 @@ test("an extension failing in session_start reaches the client, named, before th
 	} finally {
 		setExtUiPublisher(() => {});
 		rmSync(extensionPath, { force: true });
-	}
-});
-
-test("a rolled-back delete republishes activity — a suppressed glyph would outlive the failed deletion", async () => {
-	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-	const published: (ActivityStatus | null)[] = [];
-	setSessionActivityPublisher((payload) => published.push(payload.status));
-	setActivityProjectResolver(() => "project-1");
-	let reportTrashStarted: () => void = () => {};
-	const trashStarted = new Promise<void>((resolve) => {
-		reportTrashStarted = resolve;
-	});
-	let failTrash: () => void = () => {};
-	const trashOutcome = new Promise<void>((_resolve, reject) => {
-		failTrash = () => reject(new Error("recycle bin unavailable"));
-	});
-	setTrashImplementationForTests(async () => {
-		reportTrashStarted();
-		await trashOutcome;
-	});
-
-	let sessionId: string | undefined;
-	let deleting: Promise<void> | undefined;
-	try {
-		fauxA.setResponses([
-			fauxAssistantMessage("broke", { stopReason: "error", errorMessage: "provider down" }),
-		]);
-		const cwd = tmpCwd("trpi-delete-activity-");
-		const session = await createSession({
-			cwd,
-			workspaceId: "ws-delete-activity",
-			model: toWireModel(fauxA.getModel()),
-		});
-		sessionId = session.sessionId;
-		await promptSession(session.sessionId, "fail please");
-
-		const mine = async () =>
-			(await listSessionActivity()).filter((row) => row.sessionId === sessionId);
-		expect(published.at(-1)).toBe("failed");
-		expect((await mine()).map((row) => row.status)).toEqual(["failed"]);
-		expect((await mine())[0]?.projectId).toBe("project-1");
-
-		deleting = deleteSession(session.sessionId, "ws-delete-activity", cwd);
-		await trashStarted;
-		expect(await mine()).toEqual([]);
-
-		syncSessionActivity(session.sessionId);
-		expect(published.at(-1)).toBeNull();
-
-		failTrash();
-		await expect(deleting).rejects.toThrow("recycle bin unavailable");
-
-		expect(hasSession(session.sessionId)).toBe(true);
-		expect(published.at(-1)).toBe("failed");
-		expect((await mine()).map((row) => row.status)).toEqual(["failed"]);
-	} finally {
-		failTrash();
-		await deleting?.catch(() => {});
-		if (sessionId && hasSession(sessionId)) removeSession(sessionId);
-		setTrashImplementationForTests(undefined);
-		setSessionActivityPublisher(() => {});
-		setActivityProjectResolver(() => null);
-		setSessionManagerFactory(() => SessionManager.inMemory());
-	}
-});
-
-test("the activity snapshot finds a durable failure on disk with no session ever attached", async () => {
-	setActivityProjectResolver(() => "project-disk");
-	const cwd = tmpCwd("trpi-activity-disk-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-
-	const broken = writeFixtureSession(dir, {
-		id: "disk-failed",
-		cwd,
-		messages: [
-			{ role: "user", text: "ship it", timestamp: 1 },
-			{ role: "assistant", text: "tried", timestamp: 2, stopReason: "error" },
-		],
-	});
-
-	try {
-		const rows = await listSessionActivity([{ id: "ws-disk", cwd }]);
-		const mine = rows.filter((row) => row.workspaceId === "ws-disk");
-		expect(mine).toEqual([
-			{
-				sessionId: "disk-failed",
-				workspaceId: "ws-disk",
-				projectId: "project-disk",
-				status: "failed",
-			},
-		]);
-		expect(hasSession("disk-failed")).toBe(false);
-
-		const repeated = (await listSessionActivity([{ id: "ws-disk", cwd }])).filter(
-			(row) => row.workspaceId === "ws-disk",
-		);
-		expect(repeated).toEqual(mine);
-
-		appendFileSync(
-			broken.path,
-			`${JSON.stringify({
-				type: "message",
-				id: "recovered",
-				message: { role: "assistant", content: [], stopReason: "stop" },
-			})}\n`,
-		);
-		const after = (await listSessionActivity([{ id: "ws-disk", cwd }])).filter(
-			(row) => row.workspaceId === "ws-disk",
-		);
-		expect(after).toEqual([]);
-	} finally {
-		setActivityProjectResolver(() => null);
-	}
-});
-
-test("a newer finished-fine disk chat supersedes an older failure — the rail goes quiet", async () => {
-	setActivityProjectResolver(() => "project-supersede");
-	const cwd = tmpCwd("trpi-activity-supersede-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-
-	writeFixtureSession(dir, {
-		id: "disk-old-failed",
-		cwd,
-		messages: [
-			{ role: "user", text: "ship it", timestamp: 1 },
-			{ role: "assistant", text: "tried", timestamp: 2, stopReason: "error" },
-		],
-	});
-	writeFixtureSession(dir, {
-		id: "disk-new-done",
-		cwd,
-		messages: [
-			{ role: "user", text: "start over", timestamp: 3 },
-			{ role: "assistant", text: "all good", timestamp: 4, stopReason: "stop" },
-		],
-	});
-
-	try {
-		const quiet = (await listSessionActivity([{ id: "ws-sup", cwd }])).filter(
-			(row) => row.workspaceId === "ws-sup",
-		);
-		expect(quiet).toEqual([]);
-	} finally {
-		setActivityProjectResolver(() => null);
-	}
-});
-
-test("a failure that is the newest work on disk still shows — it is not superseded", async () => {
-	setActivityProjectResolver(() => "project-supersede-new");
-	const cwd = tmpCwd("trpi-activity-supersede-new-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-
-	writeFixtureSession(dir, {
-		id: "disk-old-done",
-		cwd,
-		messages: [
-			{ role: "user", text: "warm up", timestamp: 1 },
-			{ role: "assistant", text: "all good", timestamp: 2, stopReason: "stop" },
-		],
-	});
-	writeFixtureSession(dir, {
-		id: "disk-new-failed",
-		cwd,
-		messages: [
-			{ role: "user", text: "now ship", timestamp: 3 },
-			{ role: "assistant", text: "broke", timestamp: 4, stopReason: "error" },
-		],
-	});
-
-	try {
-		const rows = (await listSessionActivity([{ id: "ws-supnew", cwd }])).filter(
-			(row) => row.workspaceId === "ws-supnew",
-		);
-		expect(rows.map((row) => row.sessionId)).toEqual(["disk-new-failed"]);
-		expect(rows[0]?.status).toBe("failed");
-	} finally {
-		setActivityProjectResolver(() => null);
-	}
-});
-
-test("reopening the superseded failure keeps it hidden — attach must not restamp its recency to now", async () => {
-	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-	const published: { sessionId: string; status: ActivityStatus | null }[] = [];
-	setSessionActivityPublisher((payload) =>
-		published.push({ sessionId: payload.sessionId, status: payload.status }),
-	);
-	setActivityProjectResolver(() => "project-reopen");
-	const cwd = tmpCwd("trpi-activity-reopen-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-
-	const failed = writeFixtureSession(dir, {
-		id: "reopen-old-failed",
-		cwd,
-		messages: [
-			{ role: "user", text: "ship it", timestamp: 1 },
-			{ role: "assistant", text: "tried", timestamp: 2, stopReason: "error" },
-		],
-	});
-	writeFixtureSession(dir, {
-		id: "reopen-new-done",
-		cwd,
-		messages: [
-			{ role: "user", text: "start over", timestamp: 3 },
-			{ role: "assistant", text: "all good", timestamp: 4, stopReason: "stop" },
-		],
-	});
-
-	const mine = async () =>
-		(await listSessionActivity([{ id: "ws-reopen", cwd }])).filter(
-			(row) => row.workspaceId === "ws-reopen",
-		);
-	try {
-		expect(await mine()).toEqual([]);
-
-		expect(await ensureSessionAttached(failed.id, "ws-reopen", cwd)).toBe(true);
-
-		expect(await mine()).toEqual([]);
-		expect(published.some((row) => row.sessionId === failed.id && row.status === "failed")).toBe(
-			false,
-		);
-	} finally {
-		if (hasSession(failed.id)) removeSession(failed.id);
-		setSessionActivityPublisher(() => {});
-		setActivityProjectResolver(() => null);
-		setSessionManagerFactory(() => SessionManager.inMemory());
-	}
-});
-
-test("an unresolvable project keeps disk sessions out of the snapshot", async () => {
-	const cwd = tmpCwd("trpi-activity-noproject-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-	writeFixtureSession(dir, {
-		id: "disk-orphan",
-		cwd,
-		messages: [
-			{ role: "user", text: "hello", timestamp: 1 },
-			{ role: "assistant", text: "broke", timestamp: 2, stopReason: "error" },
-		],
-	});
-	expect(await listSessionActivity([{ id: "ws-orphan", cwd }])).toEqual([]);
-});
-
-test("an oversized terminal record is still classified — the tail grows to a record boundary", async () => {
-	setActivityProjectResolver(() => "project-big");
-	const cwd = tmpCwd("trpi-activity-big-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-	const huge = "x".repeat(200_000);
-
-	writeFixtureSession(dir, {
-		id: "disk-big-failed",
-		cwd,
-		messages: [
-			{ role: "user", text: "write the file", timestamp: 1 },
-			{ role: "assistant", text: huge, timestamp: 2, stopReason: "error" },
-		],
-	});
-
-	try {
-		const rows = await listSessionActivity([{ id: "ws-big", cwd }]);
-		expect(rows.filter((row) => row.workspaceId === "ws-big").map((row) => row.status)).toEqual([
-			"failed",
-		]);
-	} finally {
-		setActivityProjectResolver(() => null);
-	}
-});
-
-test("an oversized questionnaire record followed by its small ack still reads as waiting", async () => {
-	setActivityProjectResolver(() => "project-ask");
-	const cwd = tmpCwd("trpi-activity-bigask-");
-	const dir = defaultSessionDirFor(process.env.PI_CODING_AGENT_DIR ?? "", cwd);
-	mkdirSync(dir, { recursive: true });
-	const huge = "y".repeat(200_000);
-
-	writeFixtureSession(dir, {
-		id: "disk-big-ask",
-		cwd,
-		messages: [
-			{ role: "user", text: "which one?", timestamp: 1 },
-			{
-				role: "assistant",
-				timestamp: 2,
-				stopReason: "toolUse",
-				content: [
-					{
-						type: "toolCall",
-						id: "tc-big",
-						name: "ask_user_question",
-						arguments: {
-							questions: [
-								{
-									question: "Which?",
-									header: "Pick",
-									options: [
-										{ label: "A", description: "a", preview: huge },
-										{ label: "B", description: "b" },
-									],
-								},
-							],
-						},
-					},
-				],
-			},
-			{
-				role: "toolResult",
-				timestamp: 3,
-				toolCallId: "tc-big",
-				toolName: "ask_user_question",
-				content: [{ type: "text", text: "shown" }],
-				details: { kind: "ack" },
-				isError: false,
-			},
-		],
-	});
-
-	try {
-		const rows = await listSessionActivity([{ id: "ws-bigask", cwd }]);
-		expect(rows.filter((row) => row.workspaceId === "ws-bigask").map((row) => row.status)).toEqual([
-			"waiting",
-		]);
-	} finally {
-		setActivityProjectResolver(() => null);
 	}
 });

@@ -1,7 +1,14 @@
-export { type ActivityInputs, deriveActivityStatus } from "./activity";
 export * from "./agentSessionManager";
 export * from "./askUserQuestion";
-export { readChildTranscript } from "./delegation";
+export {
+	getSessionResources,
+	readBackgroundCommandOutput,
+	setSessionResourcesPublisher,
+	stopAllSubagents,
+	stopBackgroundCommand,
+	stopSubagent,
+} from "./chatResources";
+export { type ReviewSubagentRun, readChildTranscript, runReviewSubagent } from "./delegation";
 export {
 	type BundledExtensionFactory,
 	type BundledExtensions,
@@ -10,6 +17,11 @@ export {
 	listSkillCommands,
 	registerBundledRuntime,
 } from "./extensions";
+export {
+	listModelContextSettings,
+	setModelContextPublisher,
+	setModelContextWindow,
+} from "./modelContext";
 export * from "./oneshot";
 export {
 	activatePiRuntimeGeneration,
@@ -21,21 +33,31 @@ export {
 	type PiRuntimeGeneration,
 	type PiRuntimeGenerationInitializer,
 	type PreparePiRuntimeGenerationResult,
+	piLoginOptions,
 	preparePiRuntimeGeneration,
 	settledAvailableModels,
 } from "./piRuntime";
+export { describeProviderAuth, type ProviderAuthFacts } from "./providerAuth";
 export {
-	type AddReviewCommentParams,
+	REQUEST_REVIEW_TOOL_NAME,
+	type RequestReviewHandler,
+	requestReviewExtension,
+	setRequestReviewHandler,
+} from "./requestReviewTool";
+export { isHostResourceId, isPiSessionId } from "./resourceIdentity";
+export {
 	RESOLVE_COMMENT_TOOL_NAME,
-	type ReflectFindingParams,
 	type ResolveCommentOutcome,
-	type ReviewVerdictParams,
-	setAddReviewCommentHandler,
-	setReflectFindingHandler,
 	setReviewCommentHandler,
-	setReviewVerdictHandler,
 } from "./reviewTool";
 export * from "./sessionRepair";
+export * from "./sessionState";
 export type { SkillAdmissionContext, SkillDecision, SkillFacts } from "./skillAdmission";
 export { isProjectSkillPath } from "./skillSources";
+export {
+	SET_TITLE_TOOL_NAME,
+	type SetTitleParams,
+	setTitleToolHost,
+	type TitleToolHost,
+} from "./titleTool";
 export * from "./webUiContext";

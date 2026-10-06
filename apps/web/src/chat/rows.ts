@@ -1,6 +1,8 @@
 import {
 	assistantToolCallsAreExecutable,
+	type BackgroundCommandCompletionDetails,
 	type DelegationRunDetails,
+	type ReviewFixDetails,
 	type UserMessage,
 } from "@thinkrail/contracts";
 import type { ChatMessageOrder } from "./chatPreferences";
@@ -46,7 +48,9 @@ export type ChatRow =
 			delayMs: number;
 	  }
 	| { kind: "markdown"; id: string; text: string }
+	| { kind: "backgroundCommandCompletion"; id: string; details: BackgroundCommandCompletionDetails }
 	| { kind: "subagentCompletion"; id: string; details: DelegationRunDetails; text: string }
+	| { kind: "reviewFix"; id: string; details: ReviewFixDetails; text: string }
 	| ({ kind: "tool"; id: string } & ToolCallData)
 	| {
 			kind: "activity";
@@ -187,6 +191,9 @@ export function deriveRows(
 						delayMs: turn.delayMs,
 					});
 					break;
+				case "backgroundCommandCompletion":
+					rows.push(turn);
+					break;
 				case "subagentCompletion":
 					rows.push({
 						kind: "subagentCompletion",
@@ -194,6 +201,9 @@ export function deriveRows(
 						details: turn.details,
 						text: turn.text,
 					});
+					break;
+				case "reviewFix":
+					rows.push({ kind: "reviewFix", id: turn.id, details: turn.details, text: turn.text });
 					break;
 			}
 		}

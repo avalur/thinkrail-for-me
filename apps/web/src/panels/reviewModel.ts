@@ -1,5 +1,5 @@
 import type { GitDiffScope, ReviewAnchor, ReviewComment } from "@thinkrail/contracts";
-import type { ReviewThreadData } from "./reviewWidgets";
+import { anchorLabel, type ReviewThread } from "@/resources";
 
 export type ReviewSurface = { kind: "file" } | { kind: "diff"; scope?: GitDiffScope };
 
@@ -47,31 +47,34 @@ export function groupComments(comments: ReviewComment[]): ReviewGroup[] {
 }
 
 export function lineRef(comment: ReviewComment): string {
-	const range = comment.anchor?.selectors.find((s) => s.kind === "lineRange");
-	if (!range || !("startLine" in range)) return "";
-	return range.startLine === range.endLine
-		? `L${range.startLine}`
-		: `L${range.startLine}–${range.endLine}`;
+	return comment.anchor ? anchorLabel(comment.anchor) : "";
 }
 
 export function statusLabel(
-	comment: Pick<ReviewComment, "status" | "anchorState" | "stale" | "reflection">,
+	comment: Pick<ReviewComment, "status" | "anchorState" | "stale">,
 ): string {
 	if (comment.status !== "resolved" && comment.status !== "dismissed") {
-		if (comment.reflection?.verdict === "refuted") return `${comment.status} · refuted`;
 		if (comment.stale) return `${comment.status} · stale`;
 		if (comment.anchorState === "outdated") return `${comment.status} · outdated`;
 	}
 	return comment.status;
 }
 
-export function threadLabel(
-	t: Pick<ReviewThreadData, "status" | "anchorState" | "stale" | "refuted">,
-): string {
-	if (t.refuted) return `${t.status} · refuted`;
+export function threadLabel(t: Pick<ReviewThread, "status" | "anchorState" | "stale">): string {
 	if (t.stale) return `${t.status} · stale`;
 	if (t.anchorState === "outdated") return `${t.status} · outdated`;
 	return t.status;
+}
+
+export function outdatedReason(anchor: ReviewAnchor | null | undefined): string {
+	const kinds = new Set((anchor?.selectors ?? []).map((selector) => selector.kind));
+	if (kinds.has("textQuote")) {
+		return "The file changed or is gone, and this comment's text was not found again; it keeps its original snapshot.";
+	}
+	if (kinds.has("region") || kinds.has("structural") || kinds.has("lineRange")) {
+		return "The file's bytes changed or it is gone; a position in an image, PDF or notebook cannot be re-verified, so the comment keeps its original snapshot.";
+	}
+	return "The file this comment was about is gone.";
 }
 
 export type ReviewFlag = "draft" | "sent";
@@ -108,26 +111,26 @@ export function fileThreads(
 	comments: ReviewComment[] | undefined,
 	path: string,
 	side: ReviewAnchor["side"],
-): ReviewThreadData[] {
-	const threads: ReviewThreadData[] = [];
+): ReviewThread[] {
+	const threads: ReviewThread[] = [];
 	for (const comment of comments ?? []) {
 		if (comment.status !== "draft" && comment.status !== "sent") continue;
 		const anchor = comment.anchor;
 		if (!anchor || anchor.path !== path || anchor.side !== side) continue;
-		const range = anchor.selectors.find((s) => s.kind === "lineRange");
-		if (!range || !("startLine" in range)) continue;
 		threads.push({
 			id: comment.id,
-			startLine: range.startLine,
-			endLine: range.endLine,
+			anchor,
 			body: comment.body,
 			status: comment.status,
 			anchorState: comment.anchorState,
 			...(comment.stale ? { stale: true } : {}),
-			...(comment.reflection?.verdict === "refuted" ? { refuted: true } : {}),
 		});
 	}
-	return threads.sort((a, b) => a.endLine - b.endLine);
+	const line = (thread: ReviewThread) => {
+		const range = thread.anchor.selectors.find((selector) => selector.kind === "lineRange");
+		return range?.kind === "lineRange" ? range.endLine : Number.MAX_SAFE_INTEGER;
+	};
+	return threads.sort((left, right) => line(left) - line(right));
 }
 
 export interface ReviewFileSummary {

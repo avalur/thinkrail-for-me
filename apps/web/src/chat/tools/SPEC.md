@@ -5,7 +5,7 @@ status: active
 title: tools — built-in tool renderers
 parent: submodule-web-chat
 depends-on: [module-contracts]
-tags: [v1, chat]
+tags: [chat]
 ---
 
 ## Responsibility
@@ -29,6 +29,14 @@ registration runs once when the chat module mounts. Unregistered tools fall back
   (capability: the server's `agent` module + `reviews` seam; see [[submodule-server-reviews]]): a ✓ +
   the resolved comment id/note. **Routine** — the review sidebar is where resolution state lives; the
   card is just the in-transcript trace.
+- **`RequestReviewCard`** — the verdict card for the host-owned `request_review` tool (capability: the
+  server's `agent`/`host` request-review seam, which spawns a read-only review subagent). Reads the
+  structured `PlanReviewResult` from the tool result's `details` (defensively, via
+  `isPlanReviewResult`), shows an approve/request-changes indicator + the reviewer's one-paragraph
+  summary, and renders findings as the shared fold-out `ReviewPackageComments` (comment→item mapping
+  and the row primitive both live in `reviewPackage.ts` + `ReviewPackageComments.tsx`, reused by the
+  `reviewFix`/review-package renderers). Registered `primary` + `defaultExpanded`; `data-verdict` +
+  `data-testid="request-review-card"` are the test hooks.
 - **`AskUserQuestionCard`** — the inline questionnaire for the host-owned `ask_user_question` tool
   (capability + rationale: the server's `agent/askUserQuestion` SPEC). Registered `"bare"`: it owns its
   full-width frame, never folds, and answers through the `ChatActions` context (correlated by
@@ -186,7 +194,10 @@ registration runs once when the chat module mounts. Unregistered tools fall back
   SVG via the **lazy-loaded** `mermaid`, source fallback on parse error) and `ComparisonCard` (option
   cards with pros/cons + `recommended` highlight); shared `MermaidView` re-renders on `[data-theme]`
   change, offers a full-screen pan/zoom Dialog, and takes an optional `fallback` node shown while the
-  SVG is pending (default: a "Rendering…" line). It is also consumed by the **parent `Markdown`
+  SVG is pending (default: a "Rendering…" line). Its full-screen canvas owns both modifier-wheel zoom
+  and WebKit's `gesture*` pinch lifecycle; the latter applies absolute scale from the local gesture-start
+  baseline and prevents the desktop shell's browser-style page zoom from claiming that same pinch. It is
+  also consumed by the **parent `Markdown`
   primitive** for fenced ```mermaid blocks — the `mermaid` *package* import stays lazy and confined to
   `visualize/mermaid.ts`. Registered **primary + `defaultExpanded`** — a
   visualization is output *for the user*, not plumbing: it escapes the activity fold and renders open on

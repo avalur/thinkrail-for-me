@@ -10,14 +10,14 @@ export function ThinkingSelector({
 	onSelect,
 	container,
 	className,
-	showLabel = true,
+	disabled = false,
 }: {
 	level: ThinkingLevel;
 	levels: readonly ThinkingLevel[];
 	onSelect: (level: ThinkingLevel) => void;
 	container?: HTMLElement | null;
 	className?: string;
-	showLabel?: boolean;
+	disabled?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	return (
@@ -25,13 +25,13 @@ export function ThinkingSelector({
 			<PopoverTrigger
 				data-testid="thinking-selector"
 				data-open={open}
-				disabled={levels.length === 0}
+				disabled={disabled || levels.length === 0}
 				className={cn(
 					"flex h-32 items-center gap-8 rounded-[var(--radius-sm)] border border-control-border-default bg-clip-padding bg-control-bg px-8 tr-text-ui text-text-default outline-none transition-colors hover:bg-control-bg-hovered focus-visible:ring-2 focus-visible:ring-primary disabled:border-control-disabled-border disabled:bg-control-disabled-bg disabled:text-control-disabled-text data-[open=true]:border-control-border-active data-[open=true]:bg-control-bg-selected",
 					className,
 				)}
 			>
-				{showLabel ? <span className="tr-text-eyebrow text-text-muted">Effort</span> : null}
+				<span className="tr-text-eyebrow text-text-muted">Effort</span>
 				<span className="capitalize">{level}</span>
 				<ChevronDown className="size-16 shrink-0 text-text-muted" />
 			</PopoverTrigger>

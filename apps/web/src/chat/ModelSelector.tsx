@@ -3,7 +3,7 @@ import {
 	RiArrowDownSLine as ChevronDown,
 	RiRefreshLine as RefreshCw,
 } from "@remixicon/react";
-import type { WireModel } from "@thinkrail/contracts";
+import { sameModel, type WireModel } from "@thinkrail/contracts";
 import { useState } from "react";
 import {
 	Command,
@@ -15,12 +15,7 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib";
-
-function formatContext(tokens: number): string {
-	if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`.replace(".0", "");
-	if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-	return String(tokens);
-}
+import { formatContext } from "./modelPicker";
 
 function subLine(model: WireModel): string {
 	const parts = [`${formatContext(model.contextWindow)} context`];
@@ -39,6 +34,7 @@ export function ModelSelector({
 	placeholder,
 	defaultOption,
 	onSelectDefault,
+	disabled = false,
 }: {
 	models: WireModel[];
 	current: WireModel | null;
@@ -50,6 +46,7 @@ export function ModelSelector({
 	placeholder?: string;
 	defaultOption?: string;
 	onSelectDefault?: () => void;
+	disabled?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	const providers = [...new Set(models.map((m) => m.provider))];
@@ -70,6 +67,7 @@ export function ModelSelector({
 			<PopoverTrigger
 				data-testid="model-selector"
 				data-open={open}
+				disabled={disabled}
 				className={cn(
 					"flex h-32 max-w-[220px] items-center gap-8 rounded-[var(--radius-sm)] border border-control-border-default bg-clip-padding bg-control-bg px-8 tr-text-ui text-text-default outline-none transition-colors hover:bg-control-bg-hovered focus-visible:ring-2 focus-visible:ring-primary data-[open=true]:border-control-border-active data-[open=true]:bg-control-bg-selected",
 					className,
@@ -107,7 +105,7 @@ export function ModelSelector({
 								{models
 									.filter((m) => m.provider === provider)
 									.map((m) => {
-										const isCurrent = current?.provider === m.provider && current?.id === m.id;
+										const isCurrent = sameModel(current, m);
 										return (
 											<CommandItem
 												key={`${m.provider}:${m.id}`}

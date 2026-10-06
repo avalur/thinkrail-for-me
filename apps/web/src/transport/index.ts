@@ -7,4 +7,13 @@ export {
 	reloadSessionResourcesWithSkillBaseline,
 } from "./skillLoad";
 export type { ConnectionStatus, TransportOptions } from "./transport";
-export { getTransport, initTransport } from "./wireTransport";
+export {
+	getTransport,
+	initTransport,
+	runHostUpdate,
+	supportsChangeMutations,
+	supportsHostUpdateRun,
+	supportsPlanReview,
+	supportsPlanSummaryGeneration,
+	supportsRichAnchors,
+} from "./wireTransport";

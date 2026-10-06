@@ -9,6 +9,7 @@ import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { menuItemClass } from "../components/ui/menu-styles";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { IconTooltip } from "../components/ui/tooltip";
+import { useNow } from "../components/useNow";
 import { cn, relativeTime } from "../lib";
 import { openChatInTab } from "../panels/openChat";
 import { type ClosedChat, toast, useAppStore } from "../store";
@@ -88,6 +89,7 @@ function ClosedChatRow({
 	onDismiss: () => void;
 	onRenameChat?: (sessionId: string, titleInput: string, currentTitle: string) => void;
 }) {
+	const now = useNow();
 	const inputRef = useRef<HTMLInputElement>(null);
 	const reopenButtonRef = useRef<HTMLButtonElement>(null);
 	const editStartTitleRef = useRef(chat.title);
@@ -166,16 +168,16 @@ function ClosedChatRow({
 					data-session-id={chat.sessionId}
 					onClick={() => {
 						onDismiss();
-						const navigation = useAppStore
-							.getState()
-							.beginCenterNavigation(workspaceId, targetGroupId);
+						const store = useAppStore.getState();
+						store.noteDirectChatActivation(chat.sessionId);
+						const navigation = store.beginCenterNavigation(workspaceId, targetGroupId);
 						void openChatInTab(workspaceId, chat.sessionId, navigation);
 					}}
 					className={cn(menuItemClass, "min-w-0 flex-1")}
 				>
 					<span className="flex-1 truncate">{chat.title}</span>
 					<span className="shrink-0 tr-text-metadata text-text-muted">
-						{relativeTime(chat.closedAt)}
+						{relativeTime(chat.closedAt, now)}
 					</span>
 					<RotateCcw className="size-14 shrink-0 text-text-muted" />
 				</button>

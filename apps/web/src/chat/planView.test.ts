@@ -5,12 +5,16 @@ import {
 	adoptedCommits,
 	flatItems,
 	groupProgress,
+	hostSessionGlance,
+	isPlanReady,
 	itemChangeSet,
 	itemOpenFindings,
 	itemRevisions,
+	planChangeTotals,
 	planCompletionSummary,
 	planGlance,
 	planSections,
+	planStaleSummary,
 	planSummary,
 	reviewableItems,
 	reviewChangesRequested,
@@ -118,6 +122,38 @@ test("planGlance: an awaiting question wins even while its live tool blocks the 
 	expect(planGlance(false, { q1: asked(true) })).toBe("waiting");
 	expect(planGlance(false, { q1: asked(false, true) })).toBe("waiting");
 	expect(planGlance(false, { q1: asked(false, false, true) })).toBe("waiting");
+});
+
+test("hostSessionGlance uses host blockers and execution over stale transcript fallback", () => {
+	const base = {
+		execution: "running" as const,
+		runId: "run-1",
+		needsInput: null,
+		completion: null,
+		completionUnread: false,
+		queuedCount: 0,
+	};
+	expect(hostSessionGlance(base, "waiting_question")).toBe("working");
+	expect(
+		hostSessionGlance(
+			{
+				...base,
+				needsInput: {
+					interactionId: "dialog:d1",
+					kind: "dialog",
+					request: {
+						id: "d1",
+						sessionId: "s1",
+						kind: "confirm",
+						title: "Continue?",
+						message: "Proceed?",
+					},
+				},
+			},
+			"working",
+		),
+	).toBe("waiting_question");
+	expect(hostSessionGlance(null, "waiting_question")).toBe("waiting_question");
 });
 
 test("shouldNudgeOnAdd: never wake an agent waiting on a question; wake it otherwise", () => {
@@ -250,6 +286,25 @@ test("itemRevisions lists the commit history in order; review derivations follow
 	expect(reviewProgress(plan)).toEqual({ reviewed: 1, total: 2 });
 });
 
+test("isPlanReady is false while a reviewable step is unsettled, true once all are reviewed", () => {
+	const done: TodoItem = {
+		...item("step", "done"),
+		artifacts: [{ kind: "commit", sha: "abc" }],
+		review: { state: "unreviewed", revision: 1 },
+	};
+	// Every step done, but the reviewable one is unsettled — the plan must NOT read ship-ready.
+	expect(isPlanReady({ todos: [done], groups: [] })).toBe(false);
+	const reviewed: TodoItem = {
+		...done,
+		review: { state: "reviewed", revision: 1, at: "2026-01-01T00:00:00Z" },
+	};
+	expect(isPlanReady({ todos: [reviewed], groups: [] })).toBe(true);
+	// An open step keeps it unready regardless of review state.
+	expect(isPlanReady({ todos: [reviewed, item("pending")], groups: [] })).toBe(false);
+	// An empty plan is not ready.
+	expect(isPlanReady({ todos: [], groups: [] })).toBe(false);
+});
+
 test("reviewableItems spans adoptedCommits, but planSummary's build count counts planned items only", () => {
 	const planned: TodoItem = {
 		...item("planned", "done"),
@@ -306,6 +361,22 @@ test("itemOpenFindings: counts open agent comments anchored in the item's change
 	expect(reviewChangesRequested(item("plain", "done"))).toBe(false);
 });
 
+test("planChangeTotals counts distinct files across the whole plan, deduped by path", () => {
+	const withCommit = (title: string, sha: string, paths: string[]): TodoItem => ({
+		...item(title, "done"),
+		artifacts: [
+			{ kind: "commit", sha, files: paths.map((path) => ({ path, status: "modified" })) },
+		],
+	});
+	const plan = {
+		groups: [group("g", [withCommit("a", "sha1", ["src/x.ts", "src/y.ts"])], "done")],
+		todos: [withCommit("b", "sha2", ["src/y.ts", "src/z.ts"])],
+	};
+	// x, y, z — y is shared across two steps and counts once.
+	expect(planChangeTotals(plan).files).toBe(3);
+	expect(planChangeTotals({ groups: [], todos: [] }).files).toBe(0);
+});
+
 test("planCompletionSummary shows only while every item is done", () => {
 	const done = { todos: [item("a", "done")], groups: [], summary: "All landed." };
 	expect(planCompletionSummary(done)).toBe("All landed.");
@@ -313,6 +384,17 @@ test("planCompletionSummary shows only while every item is done", () => {
 	expect(planCompletionSummary({ ...done, todos: [item("a", "done"), item("b")] })).toBeUndefined();
 	expect(planCompletionSummary({ todos: [], groups: [], summary: "x" })).toBeUndefined();
 	expect(planCompletionSummary({ todos: [item("a", "done")], groups: [] })).toBeUndefined();
+});
+
+test("planStaleSummary keeps the stored note visible only once a completed plan re-opens", () => {
+	const done = { todos: [item("a", "done")], groups: [], summary: "All landed." };
+	// All-done is the fresh case (planCompletionSummary owns it), so no stale note.
+	expect(planStaleSummary(done)).toBeUndefined();
+	// A re-opened plan surfaces the stored note as stale.
+	expect(planStaleSummary({ ...done, todos: [item("a", "done"), item("b")] })).toBe("All landed.");
+	// No stored summary, or an empty plan, never shows one.
+	expect(planStaleSummary({ todos: [item("a")], groups: [] })).toBeUndefined();
+	expect(planStaleSummary({ todos: [], groups: [], summary: "x" })).toBeUndefined();
 });
 
 test("verificationStatus: an honest 'not verified' reads unverified; a named check reads claimed", () => {

@@ -1,14 +1,19 @@
-import { expect, test } from "bun:test";
-import type { ActivityStatus, Project, WireModel, Workspace } from "@thinkrail/contracts";
+import { describe, expect, test } from "bun:test";
+import {
+	MODEL_PICKER_PROTOCOL_VERSION,
+	type Project,
+	type SessionStateRecord,
+	type WireModel,
+	type Workspace,
+} from "@thinkrail/contracts";
 import type { WorkspaceLayoutDocument } from "../shell/layout";
-import type { EditorTab } from "./appStore";
+import { type EditorTab, EMPTY_RUNTIME } from "./appStore";
 import {
 	isConnectedGeneration,
 	isDefaultWorkspace,
 	isExternalWorkspace,
 	isUserOwnedWorkspace,
 	matchesWorktreePath,
-	projectActivityRollup,
 	selectActiveEditorTab,
 	selectActiveWorkspace,
 	selectActiveWorkspaceProjectId,
@@ -24,9 +29,14 @@ import {
 	selectLayoutResourcePlacement,
 	selectLayoutTabPlaced,
 	selectLayoutTabPlacement,
+	selectProjectIsRunning,
+	selectProjectNeedsAttention,
+	selectReadyCompletionActivation,
 	selectSkillsStale,
+	selectSupportsModelPicker,
+	selectWorkspaceIsRunning,
+	selectWorkspaceNeedsAttention,
 	specPathMatcher,
-	workspaceActivityRollup,
 } from "./selectors";
 
 const projects: Project[] = [
@@ -53,6 +63,100 @@ test("chat rename capability follows the host protocol snapshot", () => {
 	expect(selectCanRenameChat({ protocolVersion: 66 })).toBe(true);
 	expect(selectCanRenameChat({ protocolVersion: 65 })).toBe(false);
 	expect(selectCanRenameChat({ protocolVersion: null })).toBe(false);
+});
+
+test("normalized rail flags keep attention binary and working orthogonal", () => {
+	const record = (
+		sessionId: string,
+		projectId: string,
+		workspaceId: string,
+		state: SessionStateRecord["state"],
+	): SessionStateRecord => ({ sessionId, projectId, workspaceId, state });
+	const quiet = {
+		execution: "idle" as const,
+		runId: null,
+		needsInput: null,
+		completion: null,
+		completionUnread: false,
+		queuedCount: 0,
+	};
+	const working = { ...quiet, execution: "running" as const, runId: "run-working" };
+	const finished = {
+		...quiet,
+		runId: "run-finished",
+		completion: { completionId: "done", outcome: "succeeded" as const },
+		completionUnread: true,
+	};
+	const needsInput = {
+		...working,
+		needsInput: { interactionId: "question:q1", kind: "question" as const },
+	};
+	const state = {
+		sessionStateByWorkspace: {
+			w1: {
+				a: record("a", "p1", "w1", working),
+				b: record("b", "p1", "w1", finished),
+			},
+			w2: { c: record("c", "p1", "w2", needsInput) },
+			w3: { d: record("d", "p2", "w3", quiet) },
+		},
+	};
+	expect(selectWorkspaceNeedsAttention(state, "w1")).toBe(true);
+	expect(selectWorkspaceIsRunning(state, "w1")).toBe(true);
+	expect(selectWorkspaceNeedsAttention(state, "w2")).toBe(true);
+	expect(selectWorkspaceIsRunning(state, "w2")).toBe(true);
+	expect(selectProjectNeedsAttention(state, "p1")).toBe(true);
+	expect(selectProjectIsRunning(state, "p1")).toBe(true);
+	expect(selectProjectNeedsAttention(state, "p2")).toBe(false);
+	expect(selectProjectIsRunning(state, "p2")).toBe(false);
+});
+
+test("completion acknowledgement requires exact render and a direct activation after state arrival", () => {
+	const completion = { completionId: "completion:a1", outcome: "succeeded" as const };
+	const hostState = {
+		execution: "idle" as const,
+		runId: "u1",
+		needsInput: null,
+		completion,
+		completionUnread: true,
+		queuedCount: 0,
+	};
+	const state = {
+		status: "connected",
+		connectionGeneration: 4,
+		sessionStateByWorkspace: {
+			w1: { s1: { sessionId: "s1", workspaceId: "w1", projectId: "p1", state: hostState } },
+		},
+		sessions: {
+			s1: { ...EMPTY_RUNTIME, hostState, syncedConnectionGeneration: 4 },
+		},
+		sessionStateTickBySession: { s1: 10 },
+		directChatActivationTickBySession: { s1: 9 },
+		directActivatedCompletionBySession: { s1: completion.completionId },
+		renderedCompletionBySession: { s1: completion.completionId },
+	};
+	expect(selectReadyCompletionActivation(state, "w1", "s1")).toBe(completion.completionId);
+	expect(
+		selectReadyCompletionActivation(
+			{
+				...state,
+				directChatActivationTickBySession: { s1: 8 },
+				directActivatedCompletionBySession: {},
+			},
+			"w1",
+			"s1",
+		),
+	).toBeNull();
+	expect(
+		selectReadyCompletionActivation(
+			{ ...state, renderedCompletionBySession: { s1: "older" } },
+			"w1",
+			"s1",
+		),
+	).toBeNull();
+	expect(
+		selectReadyCompletionActivation({ ...state, status: "disconnected" }, "w1", "s1"),
+	).toBeNull();
 });
 
 test("workspace kind predicates distinguish managed and user-owned checkouts", () => {
@@ -464,100 +568,14 @@ test("selectAgentReviewCommentCount counts only OPEN agent-authored comments", (
 	expect(selectAgentReviewCommentCount(state, null)).toBe(0);
 });
 
-const wsActivity = (projectId: string, sessions: Record<string, ActivityStatus>) => ({
-	projectId,
-	sessions,
-});
-
-test("a workspace with no activity rows rolls up to null, so a quiet rail draws nothing", () => {
-	expect(workspaceActivityRollup({}, "wa")).toBeNull();
-	expect(workspaceActivityRollup({ wa: wsActivity("p1", {}) }, "wa")).toBeNull();
-});
-
-test("a workspace rolls up to its single chat's status and counts it", () => {
-	expect(workspaceActivityRollup({ wa: wsActivity("p1", { s1: "running" }) }, "wa")).toEqual({
-		status: "running",
-		counts: { running: 1 },
+describe("selectSupportsModelPicker", () => {
+	test("requires a connected host at or above the picker protocol", () => {
+		expect(selectSupportsModelPicker({ protocolVersion: null })).toBe(false);
+		expect(selectSupportsModelPicker({ protocolVersion: MODEL_PICKER_PROTOCOL_VERSION - 1 })).toBe(
+			false,
+		);
+		expect(selectSupportsModelPicker({ protocolVersion: MODEL_PICKER_PROTOCOL_VERSION })).toBe(
+			true,
+		);
 	});
-});
-
-test("live work outranks a failed sibling — a busy worktree never reads as red-failed", () => {
-	const rollup = workspaceActivityRollup(
-		{ wa: wsActivity("p1", { s1: "running", s2: "waiting", s3: "failed", s4: "queued" }) },
-		"wa",
-	);
-	expect(rollup?.status).toBe("waiting");
-	expect(rollup?.counts).toEqual({ running: 1, waiting: 1, failed: 1, queued: 1 });
-});
-
-test("a running chat outranks a failed one, so a still-working worktree stays 'working'", () => {
-	expect(
-		workspaceActivityRollup({ wa: wsActivity("p1", { s1: "failed", s2: "running" }) }, "wa")
-			?.status,
-	).toBe("running");
-});
-
-test("failed still owns the glyph when nothing live is happening", () => {
-	expect(
-		workspaceActivityRollup({ wa: wsActivity("p1", { s1: "failed", s2: "queued" }) }, "wa")?.status,
-	).toBe("failed");
-});
-
-test("the rollup order is waiting > running > failed > queued", () => {
-	const at = (sessions: Record<string, ActivityStatus>) =>
-		workspaceActivityRollup({ wa: wsActivity("p1", sessions) }, "wa")?.status;
-	expect(at({ s1: "waiting", s2: "running", s3: "failed", s4: "queued" })).toBe("waiting");
-	expect(at({ s1: "running", s2: "failed", s3: "queued" })).toBe("running");
-	expect(at({ s1: "failed", s2: "queued" })).toBe("failed");
-	expect(at({ s1: "queued" })).toBe("queued");
-});
-
-test("counts tally repeats, which is what lets the tooltip say '2 chats working'", () => {
-	expect(
-		workspaceActivityRollup({ wa: wsActivity("p1", { s1: "running", s2: "running" }) }, "wa")
-			?.counts,
-	).toEqual({ running: 2 });
-});
-
-test("a project rolls up across its workspaces and ignores other projects", () => {
-	const map = {
-		wa: wsActivity("p1", { s1: "running" }),
-		wb: wsActivity("p1", { s2: "failed" }),
-		wc: wsActivity("p2", { s3: "waiting" }),
-	};
-	const rollup = projectActivityRollup(map, "p1");
-	expect(rollup?.status).toBe("running");
-	expect(rollup?.counts).toEqual({ running: 1, failed: 1 });
-	expect(projectActivityRollup(map, "p2")?.status).toBe("waiting");
-	expect(projectActivityRollup(map, "p3")).toBeNull();
-});
-
-test("a project rolls up all four states across its workspaces and picks waiting", () => {
-	const map = {
-		wa: wsActivity("p1", { s1: "running", s2: "failed" }),
-		wb: wsActivity("p1", { s3: "waiting" }),
-		wc: wsActivity("p1", { s4: "queued" }),
-	};
-	const rollup = projectActivityRollup(map, "p1");
-	expect(rollup?.status).toBe("waiting");
-	expect(rollup?.counts).toEqual({ running: 1, failed: 1, waiting: 1, queued: 1 });
-});
-
-test("a project whose workspaces are all failed still surfaces the failure", () => {
-	const map = {
-		wa: wsActivity("p1", { s1: "failed" }),
-		wb: wsActivity("p1", { s2: "failed" }),
-	};
-	const rollup = projectActivityRollup(map, "p1");
-	expect(rollup?.status).toBe("failed");
-	expect(rollup?.counts).toEqual({ failed: 2 });
-});
-
-test("a project rolls up with NO workspace list loaded — the collapsed, never-opened case", () => {
-	const map = { wa: wsActivity("never-opened", { s1: "running" }) };
-	expect(projectActivityRollup(map, "never-opened")?.status).toBe("running");
-});
-
-test("a project with only quiet workspaces rolls up to null", () => {
-	expect(projectActivityRollup({}, "p1")).toBeNull();
 });

@@ -4,15 +4,16 @@ type: submodule-design
 status: active
 title: components — shared UI primitives
 parent: module-web
-tags: [v1, ui, resilience]
+tags: [ui, resilience]
 ---
 
 ## Responsibility
 
 The app's dependency-light shared React primitives: the error boundary that keeps one failed region from
-unmounting the root, project-custom icons, the quiet-scroll frame used by shell and feature panels, and
-the shared loading-skeleton primitive. Also houses the `ui/` sub-module (shadcn primitives), which has
-its own spec.
+unmounting the root, project-custom icons, the binary attention dot and working-icon treatment used by
+feature panels (currently the Projects rail), the quiet-scroll frame, and the shared loading-skeleton
+primitive. Also houses the
+`ui/` sub-module (shadcn primitives), which has its own spec.
 
 ## Boundary
 
@@ -31,27 +32,42 @@ its own spec.
 - **`QuietScrollArea.tsx`** — the store-free overflow observer and two presentation surfaces:
   `QuietScrollArea` owns an ordinary native scroll viewport, while `QuietScrollFrame` observes a
   third-party descendant scroll control without taking over its content or input and can receive the
-  library's authoritative edge state. Native areas use the shared 6px scrollbar gutter, revealing a 5px
-  optical thumb on hover/focus-within/drag/active scrolling and the full 6px thumb on direct hover. A
-  third-party frame preserves that library's wider hit geometry while replacing only the optical slider;
-  the underlying slider stays transparent through its base, hover, and active states. Authoritative edges
-  also declare vertical overflow, so xterm's controller can remain visible for local intent and accessibility
-  modes only when scrollback exists. Pointer intent lasts through release or cancellation, including a drag
-  that leaves the frame. Both surfaces paint pointer-transparent 16px curtains only on clipped directions.
-  Native measurement follows scroll, viewport/content resize, and descendant replacement. Bundled
-  high-contrast themes retain a resting hairline; OS forced-colours mode keeps a visible system-colour thumb
-  and removes the cosmetic curtains; reduced motion removes both optical and third-party controller opacity
-  transitions. Surface colour is an explicit semantic prop (`sidebar` or `terminal`), never inferred from
-  arrangement.
+  library's authoritative edge state. `styles/global.css` owns the single scrollbar definition for every
+  native scroll container: a 6px gutter, transparent track, transparent resting thumb, `--border-default`
+  while the scrolling element is hovered or carries `data-quiet-scroll-intent`, and `--text-muted` on
+  direct thumb hover/active. The reveal travels through an element-level custom property
+  (`--scrollbar-thumb`) that the thumb pseudo-element and Firefox's `scrollbar-color` both read, because
+  Chromium evaluates `:hover` inside a `::-webkit-scrollbar-*` selector against the scrollbar part, not
+  the element; every element resets the property so a hovered ancestor never reveals its descendants. Bundled high-contrast
+  themes keep a 2px resting hairline; OS forced-colours keeps a system-colour thumb and removes curtains;
+  reduced motion removes transitions. `QuietScrollArea` and `QuietScrollFrame` therefore own no look: they
+  add intent beyond hover (focus-within, active scrolling with a short grace period, pointer drags that
+  leave the frame, touch), overflow measurement, and pointer-transparent 16px edge curtains on clipped
+  directions. `QuietScrollFrame` also re-skins xterm's non-native slider to the same thumb (transparent
+  underlying slider, a 6px optical thumb, opacity gated on intent and measured vertical overflow).
+  Surface colour is an explicit semantic prop (`sidebar` or `terminal`), never inferred from arrangement.
+- **`AttentionDot.tsx`** — the store-free, static green/accent dot whose sole accessible label is “Needs
+  attention.” It carries no reason, count, tooltip, motion, or clearing behavior; callers decide only whether
+  it is present. It is the one marker for both needs-input and unread-result attention.
+- **`RunningIcon.tsx`** — a store-free wrapper for an identity icon whose existing colour must not change.
+  While active it applies the shared `animate-working` breathing (opacity dips to ~22% while the glyph
+  shrinks to 80%, 1.3s cycle) and the accessible label “Agent working”. The stock 2s fade to 50% was
+  too faint on a 14px muted glyph to read peripherally; motion plus a deep dip is what makes it
+  noticeable without changing hue or adding a marker. Reduced motion
+  removes animation and uses the same-hue static treatment. It never renders a dot, spinner, count, or
+  tooltip. Feature callers decide whether normalized host state says a top-level session is running.
 - **Also owns:** `Skeleton.tsx` — `SkeletonRows`, the one pulsing-rows placeholder every loading surface
   uses, and `LoadingRegion`, the sized-wrapper shape around it that most call sites actually want (a
   `className` for the region's own padding/sizing, an optional `label` threaded to `SkeletonRows`'
   `role="status"` region rather than opening a second one, and an optional `testId`). The full loading
   vocabulary and its rules are below.
 - **Public surface:** `ErrorBoundary`, `isChunkLoadError`, `SkeletonRows`, `LoadingRegion` — imported
-  directly via `@/components/ErrorBoundary` / `@/components/Skeleton` (no barrel); `CustomIcon`,
+  directly via `@/components/ErrorBoundary` / `@/components/Skeleton` (no barrel); `AttentionDot` via
+  `@/components/AttentionDot`; `RunningIcon` via `@/components/RunningIcon`; `CustomIcon`,
   `CustomIconName` via `@/components/CustomIcon`; `QuietScrollArea`, `QuietScrollFrame`, and the
-  `QuietScrollEdges` type via `@/components/QuietScrollArea`. The `ui/` primitives are their own sub-module
+  `QuietScrollEdges` type via `@/components/QuietScrollArea`; `useNow()` via `@/components/useNow` (the
+  wall clock as a `useSyncExternalStore` value on a shared 30 s ticker, so a render never calls `Date.now`
+  itself). The `ui/` primitives are their own sub-module
   ([components/ui/SPEC.md](ui/SPEC.md)).
 - **Allowed deps:** React, `@remixicon/react`, `lib` (`shallowEqualArrays` — the reset-keys comparison, shared
   rather than re-stated). Kept dependency-light on purpose, and `lib` is a leaf, so *any* region (shell,
@@ -83,7 +99,7 @@ third thing, never bare text, never nothing:
    `chat/ActivityGroup.tsx`/`chat/ToolCard.tsx` step icons, `panels/ProjectTree.tsx`'s "Creating worktree…"
    pending row. A narrower named sub-idiom of this tier: **`RefreshCw` spinning in place** (icon unchanged,
    just rotating) for a manual "Refresh" action on a control whose surrounding content stays visible and
-   valid while the refresh runs (`chat/ModelSelector.tsx`, `panels/GithubSettings.tsx`,
+   valid while the refresh runs (`chat/ModelEffortPicker.tsx`, `chat/ModelSelector.tsx`, `panels/GithubSettings.tsx`,
    `panels/ProvidersSettings.tsx`, `panels/BranchPicker.tsx`) — swapping to a generic spinner there would
    discard the "this still works, just refreshing" signal the in-place spin gives for free.
 
@@ -120,14 +136,13 @@ Beyond picking the right tier:
   plays once on that element's mount, and a shared wrapper around both branches would fire on first paint,
   before the data (or the resolved content itself) exists to fade in. It never re-fires on ordinary
   re-renders (a longer todo list, a new chat message) because React reconciles the same persistent DOM node
-  across those — only the branch switch is a real mount. `panels/DiffPane.tsx`/`panels/FilePane.tsx` wrap
-  `RenderedDiff`/`MarkdownPreview`'s lazy `Suspense` children in it — but pointedly **not** `MonacoDiff`/
-  `MonacoEditor`'s: `@monaco-editor/react` shows its own second `loading={<SkeletonRows/>}` internally while
-  Monaco's own runtime boots, *after* our `Suspense` chunk has already resolved, so wrapping our `Suspense`
-  boundary there fades in — a still-loading skeleton, not the real editor, an animated flash into a second,
-  unanimated skeleton swap that reads as two different loading indicators blinking rather than one. The
-  correct fix for that stacked case would live inside `MonacoEditor`/`MonacoDiff`'s own `loading` render
-  (an internal library-boot state we don't otherwise touch), not at the outer call site — left unanimated
+  across those — only the branch switch is a real mount. The registered `RenderedDiff`/`MarkdownPreview`
+  roots carry it — but pointedly **not** `MonacoEditor`'s: `@monaco-editor/react` shows its own second
+  `loading={<SkeletonRows/>}` internally while Monaco's own runtime boots, *after* our `Suspense` chunk has
+  already resolved, so wrapping our `Suspense` boundary there fades in — a still-loading skeleton, not the
+  real editor, an animated flash into a second, unanimated skeleton swap that reads as two different loading
+  indicators blinking rather than one. The correct fix for that stacked case would live inside
+  `MonacoEditor`'s own `loading` render (an internal library-boot state we don't otherwise touch), not at the outer call site — left unanimated
   until that's worth doing. A terminal body (`TerminalWorkbenchBody`) skips the reveal too, since a
   terminal's PTY attach is gated on its own visibility mount and is not worth risking for a cosmetic fade,
   and a Radix menu's items skip it as well, since wrapping bare `DropdownMenuItem`s in a div breaks the
